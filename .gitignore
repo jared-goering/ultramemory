@@ -1,0 +1,6 @@
+node_modules/
+.next/
+__pycache__/
+*.db-journal
+bulk_ingest.log
+bulk_state.json
