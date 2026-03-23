@@ -10,7 +10,6 @@ Loads config from (highest priority wins):
 
 import os
 from pathlib import Path
-from typing import Any
 
 # Try to import yaml, but don't fail if not installed (defaults still work)
 try:
@@ -57,7 +56,7 @@ def _load_yaml(path: str) -> dict:
     if yaml is None:
         return {}
     try:
-        with open(path, "r") as f:
+        with open(path) as f:
             data = yaml.safe_load(f)
             return data if isinstance(data, dict) else {}
     except (OSError, yaml.YAMLError):
@@ -122,9 +121,7 @@ def load_config(config_path: str | None = None) -> dict:
 
     # Expand ~ in session_scan_dirs
     if config.get("session_scan_dirs"):
-        config["session_scan_dirs"] = [
-            os.path.expanduser(d) for d in config["session_scan_dirs"]
-        ]
+        config["session_scan_dirs"] = [os.path.expanduser(d) for d in config["session_scan_dirs"]]
 
     return config
 

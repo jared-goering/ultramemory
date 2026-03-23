@@ -14,7 +14,7 @@ import json
 import os
 import sys
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 ENGINE_DIR = os.environ.get("MEMORY_ENGINE_DIR", os.path.dirname(os.path.abspath(__file__)))
@@ -47,10 +47,23 @@ NOISE_PATTERNS = [
 
 # Only extract from these agents (skip noisy automation agents)
 INGEST_AGENTS = {
-    "main", "builder", "forge", "architect", "designer",
-    "researcher", "oracle", "campaign", "crm", "ops",
-    "swagco", "video", "marketing", "inbox", "outreach",
-    "sage", "atlas",
+    "main",
+    "builder",
+    "forge",
+    "architect",
+    "designer",
+    "researcher",
+    "oracle",
+    "campaign",
+    "crm",
+    "ops",
+    "swagco",
+    "video",
+    "marketing",
+    "inbox",
+    "outreach",
+    "sage",
+    "atlas",
 }
 
 # Minimum segment length worth sending to LLM
@@ -130,7 +143,7 @@ def scan_session_file(filepath: str, offset: int) -> tuple[list[dict], int]:
         if size <= offset:
             return [], offset
 
-        with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
+        with open(filepath, encoding="utf-8", errors="ignore") as f:
             f.seek(offset)
             for line in f:
                 line = line.strip()
@@ -141,17 +154,19 @@ def scan_session_file(filepath: str, offset: int) -> tuple[list[dict], int]:
                     if entry.get("type") == "message":
                         text = extract_text_from_message(entry)
                         if text:
-                            messages.append({
-                                "text": text,
-                                "role": entry["message"]["role"],
-                                "timestamp": entry.get("timestamp", ""),
-                                "id": entry.get("id", ""),
-                            })
+                            messages.append(
+                                {
+                                    "text": text,
+                                    "role": entry["message"]["role"],
+                                    "timestamp": entry.get("timestamp", ""),
+                                    "id": entry.get("id", ""),
+                                }
+                            )
                 except json.JSONDecodeError:
                     continue
 
             new_offset = f.tell()
-    except (OSError, IOError) as e:
+    except OSError as e:
         print(f"  ! Error reading {filepath}: {e}", file=sys.stderr)
         return [], offset
 
@@ -232,6 +247,7 @@ def run_ingest_cycle(state: dict, dry_run: bool = False, verbose: bool = False) 
     engine = None
     if not dry_run:
         from supermemory.engine import MemoryEngine
+
         engine = MemoryEngine(db_path=DB_PATH)
 
     for filepath, agent_id, session_id in sessions:
@@ -252,8 +268,11 @@ def run_ingest_cycle(state: dict, dry_run: bool = False, verbose: bool = False) 
             session_key = f"live:{agent_id}:{session_id[:8]}"
 
             if dry_run:
-                print(f"\n{'='*60}", file=sys.stderr)
-                print(f"[DRY RUN] Would ingest segment from {agent_id}/{session_id[:8]}:", file=sys.stderr)
+                print(f"\n{'=' * 60}", file=sys.stderr)
+                print(
+                    f"[DRY RUN] Would ingest segment from {agent_id}/{session_id[:8]}:",
+                    file=sys.stderr,
+                )
                 print(segment[:300] + ("..." if len(segment) > 300 else ""), file=sys.stderr)
                 continue
 
@@ -281,19 +300,35 @@ def run_ingest_cycle(state: dict, dry_run: bool = False, verbose: bool = False) 
     state["runs"] = state.get("runs", 0) + 1
 
     if verbose or total_new > 0:
-        print(f"\nCycle complete: {segments_processed} segments, {total_new} new memories", file=sys.stderr)
+        print(
+            f"\nCycle complete: {segments_processed} segments, {total_new} new memories",
+            file=sys.stderr,
+        )
 
     return total_new
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Live auto-ingest from OpenClaw session transcripts")
+    parser = argparse.ArgumentParser(
+        description="Live auto-ingest from OpenClaw session transcripts"
+    )
 
-    parser.add_argument("--dry-run", action="store_true", help="Show what would be ingested without running LLM")
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Show what would be ingested without running LLM"
+    )
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose output")
-    parser.add_argument("--watch", action="store_true", help="Run continuously (every --interval seconds)")
-    parser.add_argument("--interval", type=int, default=_cfg["ingest_interval"], help=f"Watch interval in seconds (default: {_cfg['ingest_interval']})")
-    parser.add_argument("--reset", action="store_true", help="Reset offsets (re-process everything)")
+    parser.add_argument(
+        "--watch", action="store_true", help="Run continuously (every --interval seconds)"
+    )
+    parser.add_argument(
+        "--interval",
+        type=int,
+        default=_cfg["ingest_interval"],
+        help=f"Watch interval in seconds (default: {_cfg['ingest_interval']})",
+    )
+    parser.add_argument(
+        "--reset", action="store_true", help="Reset offsets (re-process everything)"
+    )
     parser.add_argument("--stats", action="store_true", help="Show ingestion stats")
 
     args = parser.parse_args()
@@ -325,6 +360,7 @@ def main():
                 if n > 0 and not args.dry_run:
                     try:
                         import urllib.request
+
                         req = urllib.request.Request(
                             f"http://localhost:{_cfg['api_port']}/api/cache/refresh",
                             method="POST",

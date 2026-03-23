@@ -52,6 +52,45 @@ Issues = "https://github.com/jared-goering/supermemory/issues"
 [project.scripts]
 supermemory = "supermemory.cli:cli"
 
+[project.optional-dependencies.dev]
+# Development dependencies
+ruff = ["ruff>=0.4.0"]
+pytest = ["pytest>=7.0"]
+pre-commit = ["pre-commit>=3.0"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "B",    # flake8-bugbear
+    "UP",   # pyupgrade
+    "S",    # flake8-bandit (security)
+]
+ignore = [
+    "S101",  # assert is fine in tests
+    "S104",  # binding to 0.0.0.0 is intentional for local API
+    "S110",  # bare except-pass is intentional in optional cache refresh
+    "S310",  # urlopen is for localhost only
+    "S603",  # subprocess calls are intentional
+    "S607",  # partial executable paths
+    "S608",  # SQL "injection" is parameterized placeholders, not actual injection
+    "E402",  # late imports are intentional (lazy loading for optional deps)
+    "E501",  # line length - too many long SQL/prompt strings to wrap
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
 [tool.setuptools]
 packages = ["supermemory"]
 

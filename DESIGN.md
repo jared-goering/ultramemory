@@ -20,27 +20,27 @@ OpenClaw agents currently use flat markdown files (MEMORY.md + memory/*.md) with
 -- Atomic memories: single facts extracted from conversations
 CREATE TABLE memories (
     id TEXT PRIMARY KEY,              -- uuid
-    content TEXT NOT NULL,            -- atomic fact: "Jared lives at 742 Evergreen Terrace, Springfield, IL"
+    content TEXT NOT NULL,            -- atomic fact: "Alice lives at 742 Evergreen Terrace, Springfield, IL"
     category TEXT,                    -- person, preference, project, decision, event, insight
     confidence REAL DEFAULT 1.0,      -- 0-1, decays over time
-    
+
     -- Temporal grounding (Supermemory's key insight)
     document_date TEXT NOT NULL,      -- when the conversation happened (ISO)
     event_date TEXT,                  -- when the fact/event actually occurred (ISO, nullable)
-    
+
     -- Source tracking
     source_session TEXT,              -- session key that generated this memory
     source_agent TEXT,                -- which agent extracted it
     source_chunk TEXT,                -- original conversation chunk (for context retrieval)
-    
+
     -- Versioning
     version INTEGER DEFAULT 1,
     is_current BOOLEAN DEFAULT TRUE,  -- FALSE = superseded by a newer memory
     superseded_by TEXT,               -- id of the memory that replaced this one
-    
+
     -- Embedding for semantic search
     embedding BLOB,                   -- local embedding vector (float32)
-    
+
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now'))
 );
@@ -60,7 +60,7 @@ CREATE TABLE memory_relations (
 -- User/entity profiles built from memories
 CREATE TABLE profiles (
     id TEXT PRIMARY KEY,
-    entity_name TEXT NOT NULL,        -- "Jared", "Acme Corp", etc.
+    entity_name TEXT NOT NULL,        -- "Alice", "Acme Corp", etc.
     static_profile TEXT,              -- core stable facts (JSON)
     dynamic_profile TEXT,             -- recent/evolving facts (JSON)
     updated_at TEXT DEFAULT (datetime('now'))
@@ -112,7 +112,7 @@ Conversation ends
 ### Retrieval Pipeline (replaces memory_search)
 
 ```
-Query: "What's Jared's address?"
+Query: "What's Alice's address?"
        ↓
 ┌─────────────────────────────────────────────────┐
 │ 1. SEMANTIC SEARCH on atomic memories             │
@@ -191,7 +191,7 @@ During Phase 2, both systems run in parallel:
 ### LLM calls are bounded
 Supermemory caps at 3 LLM calls per ingestion. We should too:
 1. Extract atomic memories from chunk
-2. Check relations against existing memories  
+2. Check relations against existing memories
 3. (Optional) Update profiles
 
 This keeps cost manageable even with high conversation volume.

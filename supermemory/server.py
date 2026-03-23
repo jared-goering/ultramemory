@@ -1,7 +1,6 @@
 """FastAPI wrapper around MemoryEngine for the visualization UI."""
 
 from datetime import datetime
-from typing import Optional
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -24,8 +23,10 @@ DB_PATH = cfg["db_path"]
 engine = MemoryEngine(db_path=DB_PATH)
 
 # Pre-warm: load embedding matrix into memory on startup for fast search
-import numpy as np
 import sqlite3
+
+import numpy as np
+
 
 def _build_embedding_cache():
     """Load all current embeddings into a numpy matrix for fast batch search."""
@@ -49,17 +50,25 @@ def _build_embedding_cache():
         blob = r["embedding"]
         if blob and len(blob) == embed_dim * 4:
             matrix[i] = np.frombuffer(blob, dtype=np.float32)
-            metadata.append({
-                "id": r["id"], "content": r["content"], "category": r["category"],
-                "confidence": r["confidence"], "document_date": r["document_date"],
-                "event_date": r["event_date"], "source_session": r["source_session"],
-                "version": r["version"], "is_current": bool(r["is_current"]),
-            })
+            metadata.append(
+                {
+                    "id": r["id"],
+                    "content": r["content"],
+                    "category": r["category"],
+                    "confidence": r["confidence"],
+                    "document_date": r["document_date"],
+                    "event_date": r["event_date"],
+                    "source_session": r["source_session"],
+                    "version": r["version"],
+                    "is_current": bool(r["is_current"]),
+                }
+            )
         else:
             matrix[i] = 0
             metadata.append(None)
 
     return matrix, metadata
+
 
 _embed_matrix, _embed_meta = _build_embedding_cache()
 _cache_built_at = datetime.now()
@@ -69,6 +78,7 @@ _cache_built_at = datetime.now()
 async def health():
     """Health check endpoint."""
     import sqlite3
+
     conn = sqlite3.connect(DB_PATH, timeout=10)
     count = conn.execute("SELECT COUNT(*) FROM memories WHERE is_current = 1").fetchone()[0]
     conn.close()
@@ -79,14 +89,14 @@ class IngestRequest(BaseModel):
     text: str
     session_key: str = "ui"
     agent_id: str = "user"
-    document_date: Optional[str] = None
+    document_date: str | None = None
 
 
 class SearchRequest(BaseModel):
     query: str
     top_k: int = 20
     current_only: bool = True
-    as_of_date: Optional[str] = None
+    as_of_date: str | None = None
 
 
 @app.post("/api/ingest")
@@ -129,19 +139,21 @@ async def graph():
 
     nodes = []
     for r in rows:
-        nodes.append({
-            "id": r["id"],
-            "content": r["content"],
-            "category": r["category"],
-            "confidence": r["confidence"],
-            "documentDate": r["document_date"],
-            "eventDate": r["event_date"],
-            "isCurrent": bool(r["is_current"]),
-            "version": r["version"],
-            "session": r["source_session"],
-            "agent": r["source_agent"],
-            "createdAt": r["created_at"],
-        })
+        nodes.append(
+            {
+                "id": r["id"],
+                "content": r["content"],
+                "category": r["category"],
+                "confidence": r["confidence"],
+                "documentDate": r["document_date"],
+                "eventDate": r["event_date"],
+                "isCurrent": bool(r["is_current"]),
+                "version": r["version"],
+                "session": r["source_session"],
+                "agent": r["source_agent"],
+                "createdAt": r["created_at"],
+            }
+        )
 
     # Get all relations
     rel_rows = conn.execute(
@@ -154,14 +166,16 @@ async def graph():
 
     edges = []
     for r in rel_rows:
-        edges.append({
-            "source": r["from_memory"],
-            "target": r["to_memory"],
-            "type": r["relation"],
-            "context": r["context"],
-            "sourceContent": r["source_content"],
-            "targetContent": r["target_content"],
-        })
+        edges.append(
+            {
+                "source": r["from_memory"],
+                "target": r["to_memory"],
+                "type": r["relation"],
+                "context": r["context"],
+                "sourceContent": r["source_content"],
+                "targetContent": r["target_content"],
+            }
+        )
 
     conn.close()
     return {"nodes": nodes, "edges": edges}
@@ -189,9 +203,7 @@ async def entities():
 
     conn = sqlite3.connect(DB_PATH)
     # entity_name may not exist as column; extract from content
-    rows = conn.execute(
-        "SELECT DISTINCT entity_name FROM profiles ORDER BY entity_name"
-    ).fetchall()
+    rows = conn.execute("SELECT DISTINCT entity_name FROM profiles ORDER BY entity_name").fetchall()
     conn.close()
     return {"entities": [r[0] for r in rows]}
 
@@ -199,7 +211,7 @@ async def entities():
 class RecallRequest(BaseModel):
     query: str
     top_k: int = 5
-    agent_id: Optional[str] = None
+    agent_id: str | None = None
 
 
 @app.post("/api/recall")
@@ -221,7 +233,7 @@ async def recall(req: RecallRequest):
     similarities = _embed_matrix @ query_vec
 
     # Get top_k indices
-    top_indices = np.argsort(similarities)[-req.top_k:][::-1]
+    top_indices = np.argsort(similarities)[-req.top_k :][::-1]
 
     lines = []
     for idx in top_indices:
@@ -242,7 +254,11 @@ async def recall(req: RecallRequest):
 
 class StartupContextRequest(BaseModel):
     agent_id: str
-    queries: list[str] = ["current projects and priorities", "recent decisions", "known issues and blockers"]
+    queries: list[str] = [
+        "current projects and priorities",
+        "recent decisions",
+        "known issues and blockers",
+    ]
     top_k_per_query: int = 3
 
 
@@ -263,7 +279,7 @@ async def startup_context(req: StartupContextRequest):
     for query in req.queries:
         query_vec = engine._embed(query)
         similarities = _embed_matrix @ query_vec
-        top_indices = np.argsort(similarities)[-req.top_k_per_query * 2:][::-1]
+        top_indices = np.argsort(similarities)[-req.top_k_per_query * 2 :][::-1]
 
         lines = []
         for idx in top_indices:
@@ -291,12 +307,17 @@ async def refresh_cache():
     global _embed_matrix, _embed_meta, _cache_built_at
     _embed_matrix, _embed_meta = _build_embedding_cache()
     _cache_built_at = datetime.now()
-    return {"status": "ok", "memories_cached": len([m for m in _embed_meta if m is not None]), "built_at": str(_cache_built_at)}
+    return {
+        "status": "ok",
+        "memories_cached": len([m for m in _embed_meta if m is not None]),
+        "built_at": str(_cache_built_at),
+    }
 
 
 def main():
     """Entry point for supermemory serve command."""
     import uvicorn
+
     uvicorn.run(app, host=cfg["api_host"], port=cfg["api_port"])
 
 

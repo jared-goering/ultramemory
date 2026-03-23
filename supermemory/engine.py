@@ -7,23 +7,24 @@ import json
 import sqlite3
 import uuid
 from datetime import datetime
-from typing import Optional
 
-import numpy as np
 import litellm
+import numpy as np
 
 # Lazy import — only loaded when using local embeddings
 SentenceTransformer = None
+
 
 def _get_sentence_transformer():
     global SentenceTransformer
     if SentenceTransformer is None:
         from sentence_transformers import SentenceTransformer as ST
+
         SentenceTransformer = ST
     return SentenceTransformer
 
-from supermemory.config import get_config
 
+from supermemory.config import get_config
 
 # ── Schema ───────────────────────────────────────────────────────────────────
 
@@ -122,6 +123,7 @@ Return ONLY a JSON object, no other text."""
 
 
 # ── Engine ───────────────────────────────────────────────────────────────────
+
 
 class MemoryEngine:
     """Local-first structured memory engine with temporal versioning and relations."""
@@ -225,7 +227,7 @@ class MemoryEngine:
         text: str,
         session_key: str,
         agent_id: str,
-        document_date: Optional[str] = None,
+        document_date: str | None = None,
     ) -> list[dict]:
         """
         Extract atomic memories from text, detect relations, embed and store.
@@ -238,8 +240,8 @@ class MemoryEngine:
         extract_response = self._llm_call(EXTRACT_PROMPT.format(text=text))
         try:
             extracted = self._parse_json(extract_response)
-        except (json.JSONDecodeError, ValueError):
-            raise ValueError(f"LLM extraction returned invalid JSON: {extract_response}")
+        except (json.JSONDecodeError, ValueError) as err:
+            raise ValueError(f"LLM extraction returned invalid JSON: {extract_response}") from err
 
         if not extracted:
             return []
@@ -256,7 +258,9 @@ class MemoryEngine:
                 "SELECT id, embedding FROM memories WHERE is_current = 1 AND embedding IS NOT NULL"
             ).fetchall()
             if existing_rows:
-                _existing_matrix = np.empty((len(existing_rows), self._embedding_dim), dtype=np.float32)
+                _existing_matrix = np.empty(
+                    (len(existing_rows), self._embedding_dim), dtype=np.float32
+                )
                 for ei, er in enumerate(existing_rows):
                     blob = er["embedding"]
                     if blob and len(blob) == self._embedding_dim * 4:
@@ -271,7 +275,7 @@ class MemoryEngine:
                 # Skip exact content duplicates
                 existing = conn.execute(
                     "SELECT id FROM memories WHERE content = ? AND is_current = 1 LIMIT 1",
-                    (mem_data["content"],)
+                    (mem_data["content"],),
                 ).fetchone()
                 if existing:
                     continue
@@ -305,14 +309,16 @@ class MemoryEngine:
                     ),
                 )
 
-                created_memories.append({
-                    "id": mem_id,
-                    "content": mem_data["content"],
-                    "category": mem_data.get("category"),
-                    "confidence": mem_data.get("confidence", 1.0),
-                    "entities": mem_data.get("entities", []),
-                    "embedding": embedding,
-                })
+                created_memories.append(
+                    {
+                        "id": mem_id,
+                        "content": mem_data["content"],
+                        "category": mem_data.get("category"),
+                        "confidence": mem_data.get("confidence", 1.0),
+                        "entities": mem_data.get("entities", []),
+                        "embedding": embedding,
+                    }
+                )
 
             # LLM Call 2: Detect relations to existing memories
             # For each new memory, find top-5 similar existing memories and ask LLM
@@ -348,17 +354,17 @@ class MemoryEngine:
                     relation_blocks = []
                     for mem, top_5 in all_relation_items:
                         existing_desc = "\n".join(
-                            f"  - id: {eid}, content: \"{econtent}\" (similarity: {sim:.2f})"
+                            f'  - id: {eid}, content: "{econtent}" (similarity: {sim:.2f})'
                             for eid, econtent, sim in top_5
                         )
                         relation_blocks.append(
-                            f"NEW MEMORY (id: {mem['id']}):\n\"{mem['content']}\"\n\nCANDIDATE EXISTING MEMORIES:\n{existing_desc}"
+                            f'NEW MEMORY (id: {mem["id"]}):\n"{mem["content"]}"\n\nCANDIDATE EXISTING MEMORIES:\n{existing_desc}'
                         )
 
                     combined_prompt = (
                         "For each new memory below, determine if it has relationships to the candidate existing memories.\n\n"
                         + "\n---\n".join(relation_blocks)
-                        + "\n\nReturn a JSON array of objects, each with: \"new_id\" (the new memory id), \"existing_id\", \"relation\" (updates/extends/contradicts/supports/derives), \"context\".\n"
+                        + '\n\nReturn a JSON array of objects, each with: "new_id" (the new memory id), "existing_id", "relation" (updates/extends/contradicts/supports/derives), "context".\n'
                         "Return ONLY a JSON array (empty [] if no relationships), no other text."
                     )
 
@@ -414,10 +420,7 @@ class MemoryEngine:
                     self._update_profile(conn, entity_name)
 
         # Return created memories (without embedding arrays for cleanliness)
-        return [
-            {k: v for k, v in m.items() if k != "embedding"}
-            for m in created_memories
-        ]
+        return [{k: v for k, v in m.items() if k != "embedding"} for m in created_memories]
 
     def _update_profile(self, conn: sqlite3.Connection, entity_name: str):
         """Update or create profile for an entity based on current memories."""
@@ -470,7 +473,7 @@ class MemoryEngine:
         query: str,
         top_k: int = 10,
         current_only: bool = True,
-        as_of_date: Optional[str] = None,
+        as_of_date: str | None = None,
     ) -> list[dict]:
         """
         Hybrid search: embed query → cosine similarity → temporal filter → expand relations.
@@ -551,7 +554,7 @@ class MemoryEngine:
 
             # Build results with scores
             scored = []
-            for i, r in enumerate(rows):
+            for i, _r in enumerate(rows):
                 if not valid_mask[i]:
                     continue
                 scored.append((similarities[i], i))
@@ -563,19 +566,21 @@ class MemoryEngine:
             results = []
             for sim, i in top_indices:
                 r = rows[i]
-                results.append({
-                    "id": r["id"],
-                    "content": r["content"],
-                    "category": r["category"],
-                    "confidence": r["confidence"],
-                    "document_date": r["document_date"],
-                    "event_date": r["event_date"],
-                    "source_session": r["source_session"],
-                    "source_chunk": r["source_chunk"],
-                    "version": r["version"],
-                    "is_current": bool(r["is_current"]),
-                    "similarity": float(sim),
-                })
+                results.append(
+                    {
+                        "id": r["id"],
+                        "content": r["content"],
+                        "category": r["category"],
+                        "confidence": r["confidence"],
+                        "document_date": r["document_date"],
+                        "event_date": r["event_date"],
+                        "source_session": r["source_session"],
+                        "source_chunk": r["source_chunk"],
+                        "version": r["version"],
+                        "is_current": bool(r["is_current"]),
+                        "similarity": float(sim),
+                    }
+                )
 
             # Expand relations for each result
             for result in results:
@@ -633,7 +638,7 @@ class MemoryEngine:
 
     # ── Profile ──────────────────────────────────────────────────────────
 
-    def get_profile(self, entity_name: str) -> Optional[dict]:
+    def get_profile(self, entity_name: str) -> dict | None:
         """Return static + dynamic profile for an entity."""
         with self._conn() as conn:
             row = conn.execute(
@@ -647,8 +652,12 @@ class MemoryEngine:
             return {
                 "id": row["id"],
                 "entity_name": row["entity_name"],
-                "static_profile": json.loads(row["static_profile"]) if row["static_profile"] else {},
-                "dynamic_profile": json.loads(row["dynamic_profile"]) if row["dynamic_profile"] else {},
+                "static_profile": json.loads(row["static_profile"])
+                if row["static_profile"]
+                else {},
+                "dynamic_profile": json.loads(row["dynamic_profile"])
+                if row["dynamic_profile"]
+                else {},
                 "updated_at": row["updated_at"],
             }
 
@@ -687,11 +696,17 @@ class MemoryEngine:
         """Return counts of memories, relations, entities, profiles."""
         with self._conn() as conn:
             total = conn.execute("SELECT COUNT(*) as c FROM memories").fetchone()["c"]
-            current = conn.execute("SELECT COUNT(*) as c FROM memories WHERE is_current = 1").fetchone()["c"]
-            superseded = conn.execute("SELECT COUNT(*) as c FROM memories WHERE is_current = 0").fetchone()["c"]
+            current = conn.execute(
+                "SELECT COUNT(*) as c FROM memories WHERE is_current = 1"
+            ).fetchone()["c"]
+            superseded = conn.execute(
+                "SELECT COUNT(*) as c FROM memories WHERE is_current = 0"
+            ).fetchone()["c"]
             relations = conn.execute("SELECT COUNT(*) as c FROM memory_relations").fetchone()["c"]
             profiles = conn.execute("SELECT COUNT(*) as c FROM profiles").fetchone()["c"]
-            sessions = conn.execute("SELECT COUNT(DISTINCT source_session) as c FROM memories").fetchone()["c"]
+            sessions = conn.execute(
+                "SELECT COUNT(DISTINCT source_session) as c FROM memories"
+            ).fetchone()["c"]
 
             categories = conn.execute(
                 "SELECT category, COUNT(*) as c FROM memories WHERE is_current = 1 GROUP BY category"

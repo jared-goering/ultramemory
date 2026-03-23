@@ -26,7 +26,13 @@ jobs:
         python -m pip install --upgrade pip
         pip install -e .
         pip install -e ".[local]"
-        pip install pytest
+        pip install pytest ruff
+
+    - name: Lint
+      run: ruff check .
+
+    - name: Format check
+      run: ruff format --check .
 
     - name: Run tests
       run: pytest tests/ -v

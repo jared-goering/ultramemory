@@ -3,12 +3,11 @@ OpenClaw Memory Engine — CLI Interface
 """
 
 import json
-import os
 import sys
 
 import click
 
-from supermemory.config import get_config, default_config_yaml, ensure_dirs
+from supermemory.config import default_config_yaml, ensure_dirs, get_config
 from supermemory.engine import MemoryEngine
 
 
@@ -40,7 +39,7 @@ def ingest(ctx, text, filepath, session, agent, date):
         sys.exit(1)
 
     if filepath:
-        with open(filepath, "r") as f:
+        with open(filepath) as f:
             text = f.read()
 
     engine = get_engine(ctx.obj["db"])
@@ -65,19 +64,19 @@ def ingest(ctx, text, filepath, session, agent, date):
 def search(ctx, query, top_k, all_versions, as_of):
     """Search memories by semantic similarity."""
     engine = get_engine(ctx.obj["db"])
-    results = engine.search(
-        query, top_k=top_k, current_only=not all_versions, as_of_date=as_of
-    )
+    results = engine.search(query, top_k=top_k, current_only=not all_versions, as_of_date=as_of)
 
     if not results:
         click.echo("No results found.")
         return
 
-    click.echo(f"Found {len(results)} results for: \"{query}\"\n")
+    click.echo(f'Found {len(results)} results for: "{query}"\n')
     for i, r in enumerate(results, 1):
         current = "✓" if r["is_current"] else "✗"
         click.echo(f"  {i}. [{current}] [{r['category']}] {r['content']}")
-        click.echo(f"     similarity: {r['similarity']:.3f} | confidence: {r['confidence']} | date: {r['document_date']} | v{r['version']}")
+        click.echo(
+            f"     similarity: {r['similarity']:.3f} | confidence: {r['confidence']} | date: {r['document_date']} | v{r['version']}"
+        )
         if r.get("relations"):
             for rel in r["relations"]:
                 click.echo(f"     ↳ {rel['relation']}: {rel['related_content']}")
@@ -186,8 +185,8 @@ def init(ctx):
 @click.option("--port", default=None, type=int, help="Port to bind (default: from config)")
 def serve(host, port):
     """Start the API server."""
-    from supermemory.server import main as serve_main
     import uvicorn
+
     cfg = get_config()
     uvicorn.run(
         "supermemory.server:app",

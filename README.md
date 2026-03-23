@@ -4,7 +4,7 @@ Local-first AI memory engine for agents. Supermemory extracts atomic facts from 
 
 ## Why Supermemory?
 
-**Relational versioning.** When you tell an agent you moved from Seattle to Portland, most memory systems just append a new fact. Supermemory detects the relationship: the new memory *updates* the old one. Old facts get marked as superseded, not deleted — so you can query "where did Jared live in January?" and get the right answer. Relations include `updates`, `extends`, `contradicts`, `supports`, and `derives`.
+**Relational versioning.** When you tell an agent you moved from Seattle to Portland, most memory systems just append a new fact. Supermemory detects the relationship: the new memory *updates* the old one. Old facts get marked as superseded, not deleted — so you can query "where did Alice live in January?" and get the right answer. Relations include `updates`, `extends`, `contradicts`, `supports`, and `derives`.
 
 **Temporal grounding.** Every memory carries two timestamps: `documentDate` (when it was recorded) and `eventDate` (when it happened). This lets you do time-travel queries — search memories as-of any date and get the facts that were current at that point in time.
 
@@ -31,8 +31,8 @@ pip install supermemory[local]
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...    # or any litellm-supported provider
 supermemory init
-supermemory ingest --text "Jared works at OpenClaw. He lives in Portland." --session demo --agent kit
-supermemory search "Where does Jared live?"
+supermemory ingest --text "Alice works at Acme Corp. She lives in Portland." --session demo --agent kit
+supermemory search "Where does Alice live?"
 ```
 
 ## CLI Reference
@@ -78,7 +78,7 @@ supermemory serve
 
 ```json
 {
-  "text": "Jared moved to Portland in March.",
+  "text": "Alice moved to Portland in March.",
   "session_key": "daily-standup",
   "agent_id": "kit",
   "document_date": "2025-03-15"
@@ -89,7 +89,7 @@ supermemory serve
 
 ```json
 {
-  "query": "Where does Jared live?",
+  "query": "Where does Alice live?",
   "top_k": 10,
   "current_only": true,
   "as_of_date": null

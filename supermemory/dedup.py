@@ -7,13 +7,12 @@ Combines two deduplication strategies:
 """
 
 import sqlite3
-import sys
+from typing import Any
+
 import numpy as np
-from collections import defaultdict
-from typing import List, Tuple, Dict, Any, Set
 
 
-def exact_content_dedup(db_path: str, dry_run: bool = False) -> Dict[str, Any]:
+def exact_content_dedup(db_path: str, dry_run: bool = False) -> dict[str, Any]:
     """
     Remove exact content duplicates.
 
@@ -35,7 +34,7 @@ def exact_content_dedup(db_path: str, dry_run: bool = False) -> Dict[str, Any]:
         "exact_duplicates_removed": 0,
         "noise_memories_removed": 0,
         "duplicate_groups": 0,
-        "final_stats": {}
+        "final_stats": {},
     }
 
     # --- Phase 1: Find exact content duplicates among current memories ---
@@ -61,7 +60,7 @@ def exact_content_dedup(db_path: str, dry_run: bool = False) -> Dict[str, Any]:
         for mid in all_ids:
             rel_count = conn.execute(
                 "SELECT COUNT(*) FROM memory_relations WHERE from_memory = ? OR to_memory = ?",
-                (mid, mid)
+                (mid, mid),
             ).fetchone()[0]
             if rel_count > 0:
                 ids_with_relations.add(mid)
@@ -74,7 +73,8 @@ def exact_content_dedup(db_path: str, dry_run: bool = False) -> Dict[str, Any]:
             oldest = conn.execute(
                 "SELECT id FROM memories WHERE id IN ({}) ORDER BY created_at ASC LIMIT 1".format(
                     ",".join("?" for _ in all_ids)
-                ), all_ids
+                ),
+                all_ids,
             ).fetchone()
             keeper = oldest["id"]
 
@@ -102,39 +102,47 @@ def exact_content_dedup(db_path: str, dry_run: bool = False) -> Dict[str, Any]:
 
         for mid in deletable:
             # Re-point relations to keeper (avoid creating duplicate relations)
-            conn.execute("""
+            conn.execute(
+                """
                 UPDATE memory_relations SET from_memory = ?
                 WHERE from_memory = ? AND NOT EXISTS (
                     SELECT 1 FROM memory_relations mr2
                     WHERE mr2.from_memory = ? AND mr2.to_memory = memory_relations.to_memory
                       AND mr2.relation = memory_relations.relation
                 )
-            """, (keeper, mid, keeper))
+            """,
+                (keeper, mid, keeper),
+            )
 
-            conn.execute("""
+            conn.execute(
+                """
                 UPDATE memory_relations SET to_memory = ?
                 WHERE to_memory = ? AND NOT EXISTS (
                     SELECT 1 FROM memory_relations mr2
                     WHERE mr2.to_memory = ? AND mr2.from_memory = memory_relations.from_memory
                       AND mr2.relation = memory_relations.relation
                 )
-            """, (keeper, mid, keeper))
+            """,
+                (keeper, mid, keeper),
+            )
 
     # Delete orphaned relations (pointing to memories we're about to delete)
     if ids_to_delete:
-        conn.execute("""
+        conn.execute(
+            """
             DELETE FROM memory_relations
             WHERE from_memory IN ({ids}) OR to_memory IN ({ids})
-        """.format(ids=",".join("?" for _ in ids_to_delete)), ids_to_delete + ids_to_delete)
+        """.format(ids=",".join("?" for _ in ids_to_delete)),
+            ids_to_delete + ids_to_delete,
+        )
 
         # Delete the duplicate memories
         batch_size = 100
         deleted = 0
         for i in range(0, len(ids_to_delete), batch_size):
-            batch = ids_to_delete[i:i+batch_size]
+            batch = ids_to_delete[i : i + batch_size]
             conn.execute(
-                "DELETE FROM memories WHERE id IN ({})".format(",".join("?" for _ in batch)),
-                batch
+                "DELETE FROM memories WHERE id IN ({})".format(",".join("?" for _ in batch)), batch
             )
             deleted += len(batch)
 
@@ -162,7 +170,7 @@ def exact_content_dedup(db_path: str, dry_run: bool = False) -> Dict[str, Any]:
         # Keep at most 1 instance of each noise pattern
         noise_ids = conn.execute(
             "SELECT id FROM memories WHERE content LIKE ? AND is_current = 1 ORDER BY created_at ASC",
-            (pattern,)
+            (pattern,),
         ).fetchall()
 
         if len(noise_ids) > 1:
@@ -172,11 +180,14 @@ def exact_content_dedup(db_path: str, dry_run: bool = False) -> Dict[str, Any]:
                 conn.execute(
                     "DELETE FROM memory_relations WHERE from_memory IN ({ids}) OR to_memory IN ({ids})".format(
                         ids=",".join("?" for _ in to_remove)
-                    ), to_remove + to_remove
+                    ),
+                    to_remove + to_remove,
                 )
                 conn.execute(
-                    "DELETE FROM memories WHERE id IN ({})".format(",".join("?" for _ in to_remove)),
-                    to_remove
+                    "DELETE FROM memories WHERE id IN ({})".format(
+                        ",".join("?" for _ in to_remove)
+                    ),
+                    to_remove,
                 )
                 noise_deleted += len(to_remove)
 
@@ -195,7 +206,7 @@ def exact_content_dedup(db_path: str, dry_run: bool = False) -> Dict[str, Any]:
         "current_memories": stats,
         "total_memories": total,
         "relations": rels,
-        "profiles": profiles
+        "profiles": profiles,
     }
 
     print(f"  Current memories: {stats}")
@@ -208,11 +219,15 @@ def exact_content_dedup(db_path: str, dry_run: bool = False) -> Dict[str, Any]:
     conn.execute("VACUUM")
     conn.close()
 
-    print("\nDone! Remember to refresh the API cache: curl -X POST http://localhost:8642/api/cache/refresh")
+    print(
+        "\nDone! Remember to refresh the API cache: curl -X POST http://localhost:8642/api/cache/refresh"
+    )
     return result
 
 
-def semantic_dedup(db_path: str, threshold: float = 0.95, limit: int = 500, dry_run: bool = False) -> Dict[str, Any]:
+def semantic_dedup(
+    db_path: str, threshold: float = 0.95, limit: int = 500, dry_run: bool = False
+) -> dict[str, Any]:
     """
     Semantic deduplication: find and merge near-duplicate memories.
 
@@ -231,12 +246,7 @@ def semantic_dedup(db_path: str, threshold: float = 0.95, limit: int = 500, dry_
     conn.execute("PRAGMA journal_mode=WAL")
     conn.row_factory = sqlite3.Row
 
-    result = {
-        "pairs_found": 0,
-        "memories_removed": 0,
-        "threshold": threshold,
-        "final_stats": {}
-    }
+    result = {"pairs_found": 0, "memories_removed": 0, "threshold": threshold, "final_stats": {}}
 
     print(f"Loading current memories with embeddings (threshold={threshold})...")
 
@@ -282,7 +292,7 @@ def semantic_dedup(db_path: str, threshold: float = 0.95, limit: int = 500, dry_
     duplicate_pairs = []
 
     for start in range(0, len(valid), CHUNK_SIZE):
-        chunk_indices = valid[start:start + CHUNK_SIZE]
+        chunk_indices = valid[start : start + CHUNK_SIZE]
         chunk_matrix = matrix[chunk_indices]
 
         # Compute similarity of this chunk against ALL valid memories
@@ -330,18 +340,20 @@ def semantic_dedup(db_path: str, threshold: float = 0.95, limit: int = 500, dry_
 
         # Keep the longer (more detailed) one. If same length, keep older.
         if len(content_a) >= len(content_b):
-            keeper, loser = id_a, id_b
+            _, loser = id_a, id_b
             keeper_content, loser_content = content_a, content_b
         else:
-            keeper, loser = id_b, id_a
+            _, loser = id_b, id_a
             keeper_content, loser_content = content_b, content_a
 
         to_delete.add(loser)
-        merge_log.append({
-            "similarity": sim,
-            "kept": keeper_content[:80],
-            "removed": loser_content[:80],
-        })
+        merge_log.append(
+            {
+                "similarity": sim,
+                "kept": keeper_content[:80],
+                "removed": loser_content[:80],
+            }
+        )
 
     result["memories_removed"] = len(to_delete)
     print(f"\n{len(to_delete)} memories to remove (keeping more detailed version)")
@@ -364,16 +376,13 @@ def semantic_dedup(db_path: str, threshold: float = 0.95, limit: int = 500, dry_
         # Batch delete relations and memories
         batch_size = 100
         for i in range(0, len(delete_list), batch_size):
-            batch = delete_list[i:i + batch_size]
+            batch = delete_list[i : i + batch_size]
             placeholders = ",".join("?" for _ in batch)
             conn.execute(
                 f"DELETE FROM memory_relations WHERE from_memory IN ({placeholders}) OR to_memory IN ({placeholders})",
-                batch + batch
+                batch + batch,
             )
-            conn.execute(
-                f"DELETE FROM memories WHERE id IN ({placeholders})",
-                batch
-            )
+            conn.execute(f"DELETE FROM memories WHERE id IN ({placeholders})", batch)
 
         conn.commit()
 
@@ -385,10 +394,10 @@ def semantic_dedup(db_path: str, threshold: float = 0.95, limit: int = 500, dry_
     result["final_stats"] = {
         "current_memories": current,
         "total_memories": total,
-        "relations": rels
+        "relations": rels,
     }
 
-    print(f"\nPost-dedup stats:")
+    print("\nPost-dedup stats:")
     print(f"  Current memories: {current}")
     print(f"  Total: {total}")
     print(f"  Relations: {rels}")
@@ -404,13 +413,18 @@ def main():
 
     parser = argparse.ArgumentParser(description="Memory deduplication tools")
     parser.add_argument("db_path", nargs="?", default="memory.db", help="Path to SQLite database")
-    parser.add_argument("--mode", choices=["exact", "semantic", "both"], default="exact",
-                        help="Deduplication mode")
-    parser.add_argument("--dry-run", action="store_true", help="Show what would be done without executing")
-    parser.add_argument("--threshold", type=float, default=0.95,
-                        help="Similarity threshold for semantic dedup")
-    parser.add_argument("--limit", type=int, default=500,
-                        help="Max pairs to process for semantic dedup")
+    parser.add_argument(
+        "--mode", choices=["exact", "semantic", "both"], default="exact", help="Deduplication mode"
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Show what would be done without executing"
+    )
+    parser.add_argument(
+        "--threshold", type=float, default=0.95, help="Similarity threshold for semantic dedup"
+    )
+    parser.add_argument(
+        "--limit", type=int, default=500, help="Max pairs to process for semantic dedup"
+    )
 
     args = parser.parse_args()
 

@@ -1,5 +1,5 @@
 """
-OpenClaw Memory Engine — Integration Tests
+Supermemory — Integration Tests
 
 Tests the full pipeline: ingest → search → history → profile → temporal queries.
 Mocks _llm_call and embedder so tests run without API keys or model downloads.
@@ -16,103 +16,110 @@ import numpy as np
 
 from supermemory.engine import MemoryEngine
 
-
 # ── Mock LLM responses ──────────────────────────────────────────────────────
 
 CONVERSATION_1 = """
-Jared lives at 742 Evergreen Terrace, Springfield, IL.
-He works as a software engineer at Acme Corp.
-Jared prefers dark mode for all his IDEs.
-His favorite programming language is Python.
+Alice lives at 742 Evergreen Terrace, Springfield, IL.
+She works as a software engineer at Acme Corp.
+Alice prefers dark mode for all her IDEs.
+Her favorite programming language is Python.
 """
 
-EXTRACT_RESPONSE_1 = json.dumps([
-    {
-        "content": "Jared lives at 742 Evergreen Terrace, Springfield, IL",
-        "category": "person",
-        "event_date": None,
-        "confidence": 1.0,
-        "entities": ["Jared"],
-    },
-    {
-        "content": "Jared works as a software engineer at Acme Corp",
-        "category": "person",
-        "event_date": None,
-        "confidence": 1.0,
-        "entities": ["Jared", "Acme Corp"],
-    },
-    {
-        "content": "Jared prefers dark mode for all his IDEs",
-        "category": "preference",
-        "event_date": None,
-        "confidence": 1.0,
-        "entities": ["Jared"],
-    },
-    {
-        "content": "Jared's favorite programming language is Python",
-        "category": "preference",
-        "event_date": None,
-        "confidence": 0.9,
-        "entities": ["Jared"],
-    },
-])
+EXTRACT_RESPONSE_1 = json.dumps(
+    [
+        {
+            "content": "Alice lives at 742 Evergreen Terrace, Springfield, IL",
+            "category": "person",
+            "event_date": None,
+            "confidence": 1.0,
+            "entities": ["Alice"],
+        },
+        {
+            "content": "Alice works as a software engineer at Acme Corp",
+            "category": "person",
+            "event_date": None,
+            "confidence": 1.0,
+            "entities": ["Alice", "Acme Corp"],
+        },
+        {
+            "content": "Alice prefers dark mode for all her IDEs",
+            "category": "preference",
+            "event_date": None,
+            "confidence": 1.0,
+            "entities": ["Alice"],
+        },
+        {
+            "content": "Alice's favorite programming language is Python",
+            "category": "preference",
+            "event_date": None,
+            "confidence": 0.9,
+            "entities": ["Alice"],
+        },
+    ]
+)
 
-PROFILE_RESPONSE_1 = json.dumps({
-    "static_profile": {
-        "name": "Jared",
-        "address": "742 Evergreen Terrace, Springfield, IL",
-        "employer": "Acme Corp",
-        "role": "Software Engineer",
-    },
-    "dynamic_profile": {
-        "ide_preference": "dark mode",
-        "favorite_language": "Python",
-    },
-})
+PROFILE_RESPONSE_1 = json.dumps(
+    {
+        "static_profile": {
+            "name": "Alice",
+            "address": "742 Evergreen Terrace, Springfield, IL",
+            "employer": "Acme Corp",
+            "role": "Software Engineer",
+        },
+        "dynamic_profile": {
+            "ide_preference": "dark mode",
+            "favorite_language": "Python",
+        },
+    }
+)
 
 CONVERSATION_2 = """
-Jared moved to 123 Main St, Austin, TX last month.
-He started a new job as CTO at OpenClaw.
-He still loves Python but has been writing a lot of Rust lately.
+Alice moved to 123 Main St, Austin, TX last month.
+She started a new job as CTO at Widgets Inc.
+She still loves Python but has been writing a lot of Rust lately.
 """
 
-EXTRACT_RESPONSE_2 = json.dumps([
-    {
-        "content": "Jared lives at 123 Main St, Austin, TX",
-        "category": "person",
-        "event_date": "2025-02-01",
-        "confidence": 1.0,
-        "entities": ["Jared"],
-    },
-    {
-        "content": "Jared works as CTO at OpenClaw",
-        "category": "person",
-        "event_date": "2025-02-01",
-        "confidence": 1.0,
-        "entities": ["Jared", "OpenClaw"],
-    },
-    {
-        "content": "Jared has been writing a lot of Rust lately",
-        "category": "preference",
-        "event_date": None,
-        "confidence": 0.8,
-        "entities": ["Jared"],
-    },
-])
+EXTRACT_RESPONSE_2 = json.dumps(
+    [
+        {
+            "content": "Alice lives at 123 Main St, Austin, TX",
+            "category": "person",
+            "event_date": "2025-02-01",
+            "confidence": 1.0,
+            "entities": ["Alice"],
+        },
+        {
+            "content": "Alice works as CTO at Widgets Inc",
+            "category": "person",
+            "event_date": "2025-02-01",
+            "confidence": 1.0,
+            "entities": ["Alice", "Widgets Inc"],
+        },
+        {
+            "content": "Alice has been writing a lot of Rust lately",
+            "category": "preference",
+            "event_date": None,
+            "confidence": 0.8,
+            "entities": ["Alice"],
+        },
+    ]
+)
 
-PROFILE_RESPONSE_2 = json.dumps({
-    "static_profile": {
-        "name": "Jared",
-        "address": "123 Main St, Austin, TX",
-        "employer": "OpenClaw",
-        "role": "CTO",
-    },
-    "dynamic_profile": {
-        "ide_preference": "dark mode",
-        "favorite_language": "Python",
-        "recent_language": "Rust",
-    },
-})
+PROFILE_RESPONSE_2 = json.dumps(
+    {
+        "static_profile": {
+            "name": "Alice",
+            "address": "123 Main St, Austin, TX",
+            "employer": "Widgets Inc",
+            "role": "CTO",
+        },
+        "dynamic_profile": {
+            "ide_preference": "dark mode",
+            "favorite_language": "Python",
+            "recent_language": "Rust",
+        },
+    }
+)
 
 
 def make_mock_embedder():
@@ -165,27 +172,31 @@ def make_second_ingest_llm(memories_1, profile_response=PROFILE_RESPONSE_2):
             return profile_response
         elif "NEW MEMORY" in prompt:
             # Relate: find new memory IDs from prompt, match to old memories
-            new_ids = re.findall(r'NEW MEMORY \(id: ([a-f0-9-]+)\)', prompt)
+            new_ids = re.findall(r"NEW MEMORY \(id: ([a-f0-9-]+)\)", prompt)
             old_address_id = memories_1[0]["id"]
             old_job_id = memories_1[1]["id"]
             relations = []
             for new_id in new_ids:
                 idx = prompt.find(new_id)
-                context = prompt[idx:idx + 300]
+                context = prompt[idx : idx + 300]
                 if "123 Main" in context or "Austin" in context:
-                    relations.append({
-                        "new_id": new_id,
-                        "existing_id": old_address_id,
-                        "relation": "updates",
-                        "context": "New address replaces old address",
-                    })
-                elif "CTO" in context or "OpenClaw" in context:
-                    relations.append({
-                        "new_id": new_id,
-                        "existing_id": old_job_id,
-                        "relation": "updates",
-                        "context": "New job replaces old job",
-                    })
+                    relations.append(
+                        {
+                            "new_id": new_id,
+                            "existing_id": old_address_id,
+                            "relation": "updates",
+                            "context": "New address replaces old address",
+                        }
+                    )
+                elif "CTO" in context or "Widgets" in context:
+                    relations.append(
+                        {
+                            "new_id": new_id,
+                            "existing_id": old_job_id,
+                            "relation": "updates",
+                            "context": "New job replaces old job",
+                        }
+                    )
             return json.dumps(relations)
         else:
             return "[]"
@@ -212,11 +223,11 @@ class TestMemoryEngine(unittest.TestCase):
         )
 
         self.assertEqual(len(memories), 4)
-        self.assertTrue(any("742" in m["content"] for m in memories))
+        self.assertTrue(any("742 Evergreen" in m["content"] for m in memories))
         self.assertTrue(any("Acme Corp" in m["content"] for m in memories))
 
         # Search should find results
-        results = self.engine.search("What is Jared's address?")
+        results = self.engine.search("What is Alice's address?")
         self.assertTrue(len(results) > 0)
 
         # All should be current
@@ -244,14 +255,14 @@ class TestMemoryEngine(unittest.TestCase):
         self.assertGreater(stats["superseded_memories"], 0)
 
         # Current-only search should return new address, not old
-        results = self.engine.search("Jared address")
+        results = self.engine.search("Alice address")
         address_results = [r for r in results if "lives" in r["content"].lower()]
         current_addresses = [r for r in address_results if r["is_current"]]
         for ca in current_addresses:
             self.assertIn("Austin", ca["content"])
 
         # All-versions search should include old address
-        all_results = self.engine.search("Jared address", current_only=False)
+        all_results = self.engine.search("Alice address", current_only=False)
         all_address = [r for r in all_results if "lives" in r["content"].lower()]
         contents = " ".join(r["content"] for r in all_address)
         self.assertIn("Springfield", contents)
@@ -272,15 +283,17 @@ class TestMemoryEngine(unittest.TestCase):
         )
 
         # Query as of 2025-02-01 — before second ingestion
-        results_feb = self.engine.search("Jared address", as_of_date="2025-02-01")
+        results_feb = self.engine.search("Alice address", as_of_date="2025-02-01")
         address_results = [r for r in results_feb if "lives" in r["content"].lower()]
         # Should only get old address (Springfield) — Austin wasn't ingested yet
         for ar in address_results:
             self.assertIn("Springfield", ar["content"])
 
         # Query as of 2025-04-01 — after second ingestion
-        results_apr = self.engine.search("Jared address", as_of_date="2025-04-01")
-        address_results = [r for r in results_apr if "lives" in r["content"].lower() and r["is_current"]]
+        results_apr = self.engine.search("Alice address", as_of_date="2025-04-01")
+        address_results = [
+            r for r in results_apr if "lives" in r["content"].lower() and r["is_current"]
+        ]
         for ar in address_results:
             self.assertIn("Austin", ar["content"])
 
@@ -289,21 +302,21 @@ class TestMemoryEngine(unittest.TestCase):
         self.engine._llm_call = make_first_ingest_llm()
         self.engine.ingest(CONVERSATION_1, "s1", "kit", "2025-01-15")
 
-        history = self.engine.get_history("Jared")
+        history = self.engine.get_history("Alice")
         self.assertGreater(len(history), 0)
         for entry in history:
-            self.assertIn("Jared", entry["content"])
+            self.assertIn("Alice", entry["content"])
 
     def test_profile(self):
         """Test profile creation from memories."""
         self.engine._llm_call = make_first_ingest_llm()
         self.engine.ingest(CONVERSATION_1, "s1", "kit", "2025-01-15")
 
-        profile = self.engine.get_profile("Jared")
+        profile = self.engine.get_profile("Alice")
         self.assertIsNotNone(profile)
-        self.assertEqual(profile["entity_name"], "Jared")
+        self.assertEqual(profile["entity_name"], "Alice")
         self.assertIn("name", profile["static_profile"])
-        self.assertEqual(profile["static_profile"]["name"], "Jared")
+        self.assertEqual(profile["static_profile"]["name"], "Alice")
 
     def test_stats(self):
         """Test stats reporting."""
