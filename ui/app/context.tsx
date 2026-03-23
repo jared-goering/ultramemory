@@ -84,7 +84,13 @@ export function MemoryProvider({ children }: { children: ReactNode }) {
 
       setNodes(graph.nodes);
       setEdges(graph.edges);
-      setStats(statsData);
+      setStats({
+        total: statsData.total_memories ?? statsData.total ?? 0,
+        current: statsData.current_memories ?? statsData.current ?? 0,
+        superseded: statsData.superseded_memories ?? statsData.superseded ?? 0,
+        relations: statsData.relations ?? 0,
+        categories: statsData.categories ?? {},
+      });
       setEntities(
         Array.isArray(entitiesData) ? entitiesData : (entitiesData.entities ?? [])
       );
