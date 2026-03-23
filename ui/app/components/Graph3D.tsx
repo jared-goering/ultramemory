@@ -131,7 +131,7 @@ function GraphScene() {
     return arr;
   }, [validEdges]);
 
-  // ── Camera fit ────────────────────────────────────────────────────────────
+  // ── Camera fit — zoom out enough to see the whole graph ────────────────
   const { camera } = useThree();
   useEffect(() => {
     if (basePositions.size === 0) return;
@@ -140,7 +140,8 @@ function GraphScene() {
       const d = Math.sqrt(x * x + y * y + z * z);
       if (d > maxDist) maxDist = d;
     });
-    const dist = Math.max(maxDist * 2.5, 30);
+    // 3x the furthest node from center, min 60 units out
+    const dist = Math.max(maxDist * 3, 60);
     camera.position.set(dist * 0.8, dist * 0.6, dist * 0.8);
     camera.lookAt(0, 0, 0);
   }, [basePositions, camera]);
@@ -405,10 +406,8 @@ function EnhancedControls({
 }) {
   const controlsRef = useRef<any>(null);
   const { camera } = useThree();
-  const targetRef = useRef(new THREE.Vector3(0, 0, 0));
-  const flyingRef = useRef(false);
 
-  // Fly to selected node on double-click or selection change
+  // Fly to selected node
   useEffect(() => {
     if (!selectedNodeId || !controlsRef.current) return;
     const mesh = nodeRefs.current?.get(selectedNodeId);
@@ -417,12 +416,8 @@ function EnhancedControls({
     const nodePos = mesh.position.clone();
     const controls = controlsRef.current;
 
-    // Animate camera to focus on selected node
-    flyingRef.current = true;
     const startTarget = controls.target.clone();
     const startPos = camera.position.clone();
-
-    // Position camera at a nice distance from the node
     const offset = camera.position.clone().sub(controls.target).normalize().multiplyScalar(15);
     const endPos = nodePos.clone().add(offset);
 
@@ -432,7 +427,6 @@ function EnhancedControls({
       if (progress >= 1) {
         controls.target.copy(nodePos);
         camera.position.copy(endPos);
-        flyingRef.current = false;
         return;
       }
       const t = easeInOutCubic(progress);
@@ -449,22 +443,23 @@ function EnhancedControls({
       enableDamping
       dampingFactor={0.12}
       rotateSpeed={0.8}
-      zoomSpeed={1.4}
-      panSpeed={1.2}
-      minDistance={3}
-      maxDistance={300}
+      zoomSpeed={1.8}
+      panSpeed={1.0}
+      minDistance={1}
+      maxDistance={1000}
       enablePan={true}
+      screenSpacePanning={true}
+      /* Trackpad-friendly: all mouse buttons rotate, scroll zooms, shift+drag pans */
       mouseButtons={{
         LEFT: THREE.MOUSE.ROTATE,
-        MIDDLE: THREE.MOUSE.DOLLY,
-        RIGHT: THREE.MOUSE.PAN,
+        MIDDLE: THREE.MOUSE.ROTATE,
+        RIGHT: THREE.MOUSE.ROTATE,
       }}
       touches={{
         ONE: THREE.TOUCH.ROTATE,
         TWO: THREE.TOUCH.DOLLY_PAN,
       }}
-      // Smooth zoom
-      zoomToCursor={true}
+      /* shift+drag = pan is built into OrbitControls by default when enablePan=true */
     />
   );
 }
@@ -496,15 +491,15 @@ function ControlsHelp() {
       <div className="bg-zinc-900/90 border border-zinc-700/40 rounded-xl px-5 py-3 backdrop-blur-md shadow-2xl">
         <div className="flex items-center gap-6 text-[11px] text-zinc-400">
           <div className="flex items-center gap-1.5">
-            <kbd className="bg-zinc-800 px-1.5 py-0.5 rounded text-zinc-300 font-mono text-[10px]">Left drag</kbd>
+            <kbd className="bg-zinc-800 px-1.5 py-0.5 rounded text-zinc-300 font-mono text-[10px]">Drag</kbd>
             <span>Rotate</span>
           </div>
           <div className="flex items-center gap-1.5">
-            <kbd className="bg-zinc-800 px-1.5 py-0.5 rounded text-zinc-300 font-mono text-[10px]">Right drag</kbd>
+            <kbd className="bg-zinc-800 px-1.5 py-0.5 rounded text-zinc-300 font-mono text-[10px]">⇧ Shift + Drag</kbd>
             <span>Pan</span>
           </div>
           <div className="flex items-center gap-1.5">
-            <kbd className="bg-zinc-800 px-1.5 py-0.5 rounded text-zinc-300 font-mono text-[10px]">Scroll</kbd>
+            <kbd className="bg-zinc-800 px-1.5 py-0.5 rounded text-zinc-300 font-mono text-[10px]">Scroll / Pinch</kbd>
             <span>Zoom</span>
           </div>
           <div className="flex items-center gap-1.5">
@@ -577,26 +572,18 @@ export default function Graph3D() {
 /** Listens for the zoom-to-fit custom event inside the Canvas */
 function FitListener() {
   const { camera } = useThree();
-  const { nodes } = useMemory();
 
   useEffect(() => {
     const handler = () => {
-      if (nodes.length === 0) return;
-      // Compute bounding sphere
-      let cx = 0, cy = 0, cz = 0;
-      nodes.forEach((n) => {
-        cx += (n as any).x ?? 0;
-        cy += (n as any).y ?? 0;
-        cz += (n as any).z ?? 0;
-      });
-      // Reset camera to default overview
-      const dist = Math.max(nodes.length * 1.2, 40);
+      // Reset camera to a generous overview position
+      // The force layout centers around 0,0,0 so this always works
+      const dist = 120;
       camera.position.set(dist * 0.8, dist * 0.6, dist * 0.8);
       camera.lookAt(0, 0, 0);
     };
     window.addEventListener("memory-graph-fit", handler);
     return () => window.removeEventListener("memory-graph-fit", handler);
-  }, [camera, nodes]);
+  }, [camera]);
 
   return null;
 }
