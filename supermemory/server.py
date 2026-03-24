@@ -155,11 +155,81 @@ async def ingest(req: IngestRequest):
         agent_id=req.agent_id,
         document_date=req.document_date,
     )
+    # Auto-refresh cache after ingest so search/recall see new memories immediately
+    if memories:
+        global _embed_matrix, _embed_meta, _cache_built_at
+        _embed_matrix, _embed_meta = _build_embedding_cache()
+        _cache_built_at = datetime.now()
     return {"memories": memories, "count": len(memories)}
 
 
 @app.post("/api/search")
 async def search(req: SearchRequest):
+    global _embed_matrix, _embed_meta
+
+    # Use in-memory cache for current_only searches without as_of_date (fast path)
+    if (
+        req.current_only
+        and not req.as_of_date
+        and _embed_matrix is not None
+        and len(_embed_meta) > 0
+    ):
+        query_vec = engine._embed(req.query)
+        similarities = _embed_matrix @ query_vec
+
+        # O(n) argpartition for top-k
+        n = len(similarities)
+        k = min(req.top_k, n)
+        if n > k:
+            top_indices = np.argpartition(similarities, -k)[-k:]
+            top_indices = top_indices[np.argsort(similarities[top_indices])[::-1]]
+        else:
+            top_indices = np.argsort(similarities)[::-1]
+
+        results = []
+        for idx in top_indices:
+            meta = _embed_meta[idx]
+            if meta is None:
+                continue
+            result = {
+                **meta,
+                "similarity": float(similarities[idx]),
+                "relations": [],
+            }
+            if not req.include_source:
+                result.pop("source_chunk", None)
+            results.append(result)
+
+        # Hydrate relations from DB for top results
+        conn = sqlite3.connect(DB_PATH, timeout=10)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.row_factory = sqlite3.Row
+        for result in results:
+            rels = conn.execute(
+                """SELECT mr.relation, mr.context, m.content as related_content,
+                          m.id as related_id
+                   FROM memory_relations mr
+                   JOIN memories m ON (
+                       CASE WHEN mr.from_memory = ? THEN mr.to_memory
+                            ELSE mr.from_memory END
+                   ) = m.id
+                   WHERE mr.from_memory = ? OR mr.to_memory = ?""",
+                (result["id"], result["id"], result["id"]),
+            ).fetchall()
+            result["relations"] = [
+                {
+                    "relation": rel["relation"],
+                    "context": rel["context"],
+                    "related_content": rel["related_content"],
+                    "related_id": rel["related_id"],
+                }
+                for rel in rels
+            ]
+        conn.close()
+        return {"results": results, "count": len(results)}
+
+    # Fallback to engine.search for as_of_date or non-current queries
     results = engine.search(
         req.query,
         top_k=req.top_k,

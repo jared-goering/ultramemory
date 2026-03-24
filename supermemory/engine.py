@@ -233,12 +233,14 @@ class MemoryEngine:
     ) -> list[dict]:
         """
         Extract atomic memories from text, detect relations, embed and store.
-        Returns list of created memory dicts.
+
+        Transaction strategy: LLM calls happen OUTSIDE db transactions.
+        DB writes use short, focused transactions to avoid lock contention.
         """
         if document_date is None:
             document_date = datetime.now().isoformat()[:10]
 
-        # LLM Call 1: Extract atomic memories
+        # ── Phase 1: LLM extraction (no DB lock) ────────────────────────
         extract_response = self._llm_call(EXTRACT_PROMPT.format(text=text))
         try:
             extracted = self._parse_json(extract_response)
@@ -248,31 +250,33 @@ class MemoryEngine:
         if not extracted:
             return []
 
-        # Embed all new memories in one batch
+        # Embed all new memories in one batch (no DB lock)
         contents = [m["content"] for m in extracted]
         embeddings = self._embed_batch(contents)
 
+        # ── Phase 2: Short write transaction for inserts ─────────────────
         created_memories = []
-
-        with self._conn() as conn:
-            # Load existing embeddings for semantic dedup check
+        conn = self._conn()
+        try:
+            # Load existing embeddings for dedup (read-only, WAL allows concurrent reads)
             existing_rows = conn.execute(
                 "SELECT id, embedding FROM memories WHERE is_current = 1 AND embedding IS NOT NULL"
             ).fetchall()
+
+            existing_matrix = None
             if existing_rows:
-                _existing_matrix = np.empty(
+                existing_matrix = np.empty(
                     (len(existing_rows), self._embedding_dim), dtype=np.float32
                 )
                 for ei, er in enumerate(existing_rows):
                     blob = er["embedding"]
                     if blob and len(blob) == self._embedding_dim * 4:
-                        _existing_matrix[ei] = np.frombuffer(blob, dtype=np.float32)
+                        existing_matrix[ei] = np.frombuffer(blob, dtype=np.float32)
                     else:
-                        _existing_matrix[ei] = 0
-            else:
-                _existing_matrix = None
+                        existing_matrix[ei] = 0
 
-            # Build list of new memory records
+            # Build insert batch (filter dupes first, then single INSERT batch)
+            insert_batch = []
             for i, mem_data in enumerate(extracted):
                 # Skip exact content duplicates
                 existing = conn.execute(
@@ -282,168 +286,195 @@ class MemoryEngine:
                 if existing:
                     continue
 
-                mem_id = str(uuid.uuid4())
                 embedding = embeddings[i]
 
-                # Skip semantic near-duplicates (>0.97 cosine similarity)
-                if _existing_matrix is not None and len(existing_rows) > 0:
-                    sims = _existing_matrix @ embedding
-                    max_sim = float(np.max(sims))
-                    if max_sim > self._dedup_threshold:
+                # Skip semantic near-duplicates
+                if existing_matrix is not None and len(existing_rows) > 0:
+                    sims = existing_matrix @ embedding
+                    if float(np.max(sims)) > self._dedup_threshold:
                         continue
 
-                conn.execute(
-                    """INSERT INTO memories
-                       (id, content, category, confidence, document_date, event_date,
-                        source_session, source_agent, source_chunk, embedding)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (
-                        mem_id,
-                        mem_data["content"],
-                        mem_data.get("category"),
-                        mem_data.get("confidence", 1.0),
-                        document_date,
-                        mem_data.get("event_date"),
-                        session_key,
-                        agent_id,
-                        text,
-                        self._vec_to_blob(embedding),
-                    ),
-                )
+                mem_id = str(uuid.uuid4())
+                insert_batch.append((mem_id, mem_data, embedding))
 
-                created_memories.append(
-                    {
-                        "id": mem_id,
-                        "content": mem_data["content"],
-                        "category": mem_data.get("category"),
-                        "confidence": mem_data.get("confidence", 1.0),
-                        "entities": mem_data.get("entities", []),
-                        "embedding": embedding,
-                    }
-                )
+            # Single write transaction for all inserts
+            if insert_batch:
+                conn.execute("BEGIN IMMEDIATE")
+                for mem_id, mem_data, embedding in insert_batch:
+                    conn.execute(
+                        """INSERT INTO memories
+                           (id, content, category, confidence, document_date, event_date,
+                            source_session, source_agent, source_chunk, embedding)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (
+                            mem_id,
+                            mem_data["content"],
+                            mem_data.get("category"),
+                            mem_data.get("confidence", 1.0),
+                            document_date,
+                            mem_data.get("event_date"),
+                            session_key,
+                            agent_id,
+                            text,
+                            self._vec_to_blob(embedding),
+                        ),
+                    )
+                    created_memories.append(
+                        {
+                            "id": mem_id,
+                            "content": mem_data["content"],
+                            "category": mem_data.get("category"),
+                            "confidence": mem_data.get("confidence", 1.0),
+                            "entities": mem_data.get("entities", []),
+                            "embedding": embedding,
+                        }
+                    )
+                conn.commit()
+        finally:
+            conn.close()
 
-            # LLM Call 2: Detect relations to existing memories
-            # For each new memory, find top-5 similar existing memories and ask LLM
+        if not created_memories:
+            return []
+
+        # ── Phase 3: Relation detection via LLM (no DB lock) ────────────
+        # Read existing memories for similarity comparison
+        conn = self._conn()
+        try:
             existing_rows = conn.execute(
                 "SELECT id, content, embedding FROM memories WHERE is_current = 1"
             ).fetchall()
+        finally:
+            conn.close()
 
-            # Build existing embeddings matrix (exclude just-created memories)
-            new_ids = {m["id"] for m in created_memories}
-            existing = [
-                (r["id"], r["content"], self._blob_to_vec(r["embedding"]))
-                for r in existing_rows
-                if r["id"] not in new_ids and r["embedding"] is not None
-            ]
+        new_ids = {m["id"] for m in created_memories}
+        existing = [
+            (r["id"], r["content"], self._blob_to_vec(r["embedding"]))
+            for r in existing_rows
+            if r["id"] not in new_ids and r["embedding"] is not None
+        ]
 
-            if existing:
-                # Batch all new memories' relation checks into one LLM call
-                all_relation_items = []
-                for mem in created_memories:
-                    # Find top-5 similar existing memories
-                    similarities = [
-                        (eid, econtent, self._cosine_similarity(mem["embedding"], evec))
-                        for eid, econtent, evec in existing
-                    ]
-                    similarities.sort(key=lambda x: x[2], reverse=True)
-                    top_5 = similarities[:5]
+        relations = []
+        if existing:
+            all_relation_items = []
+            for mem in created_memories:
+                similarities = [
+                    (eid, econtent, self._cosine_similarity(mem["embedding"], evec))
+                    for eid, econtent, evec in existing
+                ]
+                similarities.sort(key=lambda x: x[2], reverse=True)
+                top_5 = similarities[:5]
 
-                    if top_5 and top_5[0][2] > 0.3:  # Only check if there's reasonable similarity
-                        all_relation_items.append((mem, top_5))
+                if top_5 and top_5[0][2] > 0.3:
+                    all_relation_items.append((mem, top_5))
 
-                if all_relation_items:
-                    # Build a single prompt for all relation checks
-                    relation_blocks = []
-                    for mem, top_5 in all_relation_items:
-                        existing_desc = "\n".join(
-                            f'  - id: {eid}, content: "{econtent}" (similarity: {sim:.2f})'
-                            for eid, econtent, sim in top_5
-                        )
-                        relation_blocks.append(
-                            f'NEW MEMORY (id: {mem["id"]}):\n"{mem["content"]}"\n\nCANDIDATE EXISTING MEMORIES:\n{existing_desc}'
-                        )
-
-                    combined_prompt = (
-                        "For each new memory below, determine if it has relationships to the candidate existing memories.\n\n"
-                        + "\n---\n".join(relation_blocks)
-                        + '\n\nReturn a JSON array of objects, each with: "new_id" (the new memory id), "existing_id", "relation" (updates/extends/contradicts/supports/derives), "context".\n'
-                        "Return ONLY a JSON array (empty [] if no relationships), no other text."
+            if all_relation_items:
+                relation_blocks = []
+                for mem, top_5 in all_relation_items:
+                    existing_desc = "\n".join(
+                        f'  - id: {eid}, content: "{econtent}" (similarity: {sim:.2f})'
+                        for eid, econtent, sim in top_5
+                    )
+                    relation_blocks.append(
+                        f'NEW MEMORY (id: {mem["id"]}):\n"{mem["content"]}"\n\n'
+                        f"CANDIDATE EXISTING MEMORIES:\n{existing_desc}"
                     )
 
-                    relate_response = self._llm_call(combined_prompt)
-                    try:
-                        relations = self._parse_json(relate_response)
-                    except (json.JSONDecodeError, ValueError):
-                        relations = []
+                combined_prompt = (
+                    "For each new memory below, determine if it has relationships "
+                    "to the candidate existing memories.\n\n"
+                    + "\n---\n".join(relation_blocks)
+                    + '\n\nReturn a JSON array of objects, each with: "new_id" (the new memory id), '
+                    '"existing_id", "relation" (updates/extends/contradicts/supports/derives), "context".\n'
+                    "Return ONLY a JSON array (empty [] if no relationships), no other text."
+                )
 
-                    # Process relations
-                    for rel in relations:
-                        new_id = rel.get("new_id")
-                        existing_id = rel.get("existing_id")
-                        relation_type = rel.get("relation")
-                        context = rel.get("context", "")
+                # LLM call happens outside any transaction
+                relate_response = self._llm_call(combined_prompt)
+                try:
+                    relations = self._parse_json(relate_response)
+                except (json.JSONDecodeError, ValueError):
+                    relations = []
 
-                        if not new_id or not existing_id or not relation_type:
-                            continue
+        # ── Phase 4: Short write transaction for relations ───────────────
+        if relations:
+            conn = self._conn()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                for rel in relations:
+                    new_id = rel.get("new_id")
+                    existing_id = rel.get("existing_id")
+                    relation_type = rel.get("relation")
+                    context = rel.get("context", "")
+
+                    if not new_id or not existing_id or not relation_type:
+                        continue
+
+                    conn.execute(
+                        """INSERT INTO memory_relations
+                           (from_memory, to_memory, relation, context)
+                           VALUES (?, ?, ?, ?)""",
+                        (new_id, existing_id, relation_type, context),
+                    )
+
+                    if relation_type == "updates":
+                        old_row = conn.execute(
+                            "SELECT version FROM memories WHERE id = ?",
+                            (existing_id,),
+                        ).fetchone()
+                        old_version = old_row["version"] if old_row else 1
 
                         conn.execute(
-                            """INSERT INTO memory_relations
-                               (from_memory, to_memory, relation, context)
-                               VALUES (?, ?, ?, ?)""",
-                            (new_id, existing_id, relation_type, context),
+                            "UPDATE memories SET is_current = 0, superseded_by = ?, "
+                            "updated_at = datetime('now') WHERE id = ?",
+                            (new_id, existing_id),
                         )
+                        conn.execute(
+                            "UPDATE memories SET version = ?, "
+                            "updated_at = datetime('now') WHERE id = ?",
+                            (old_version + 1, new_id),
+                        )
+                conn.commit()
+            finally:
+                conn.close()
 
-                        # If this updates an existing memory, mark old as superseded
-                        if relation_type == "updates":
-                            # Get the version of the existing memory
-                            old_row = conn.execute(
-                                "SELECT version FROM memories WHERE id = ?",
-                                (existing_id,),
-                            ).fetchone()
-                            old_version = old_row["version"] if old_row else 1
+        # ── Phase 5: Profile updates via LLM (no DB lock during LLM) ────
+        all_entities = set()
+        for mem in created_memories:
+            for entity in mem.get("entities", []):
+                all_entities.add(entity)
 
-                            conn.execute(
-                                "UPDATE memories SET is_current = 0, superseded_by = ?, updated_at = datetime('now') WHERE id = ?",
-                                (new_id, existing_id),
-                            )
-                            conn.execute(
-                                "UPDATE memories SET version = ?, updated_at = datetime('now') WHERE id = ?",
-                                (old_version + 1, new_id),
-                            )
+        if all_entities:
+            for entity_name in all_entities:
+                self._update_profile_safe(entity_name)
 
-            # LLM Call 3: Update profiles for mentioned entities
-            all_entities = set()
-            for mem in created_memories:
-                for entity in mem.get("entities", []):
-                    all_entities.add(entity)
-
-            if all_entities:
-                for entity_name in all_entities:
-                    self._update_profile(conn, entity_name)
-
-        # Return created memories (without embedding arrays for cleanliness)
         return [{k: v for k, v in m.items() if k != "embedding"} for m in created_memories]
 
-    def _update_profile(self, conn: sqlite3.Connection, entity_name: str):
-        """Update or create profile for an entity based on current memories."""
-        # Find all current memories mentioning this entity
-        rows = conn.execute(
-            "SELECT content, category, confidence, document_date FROM memories WHERE is_current = 1 AND content LIKE ?",
-            (f"%{entity_name}%",),
-        ).fetchall()
+    def _update_profile_safe(self, entity_name: str):
+        """Update profile with LLM call outside the DB transaction."""
+        # Phase A: Read memories (short read)
+        conn = self._conn()
+        try:
+            rows = conn.execute(
+                "SELECT content, category, confidence, document_date "
+                "FROM memories WHERE is_current = 1 AND content LIKE ?",
+                (f"%{entity_name}%",),
+            ).fetchall()
+        finally:
+            conn.close()
 
         if not rows:
             return
 
         memories_text = "\n".join(
-            f"- [{r['category']}] {r['content']} (date: {r['document_date']}, confidence: {r['confidence']})"
+            f"- [{r['category']}] {r['content']} "
+            f"(date: {r['document_date']}, confidence: {r['confidence']})"
             for r in rows
         )
 
+        # Phase B: LLM call (no DB lock)
         profile_response = self._llm_call(
             PROFILE_PROMPT.format(entity_name=entity_name, memories=memories_text)
         )
-
         try:
             profile_data = self._parse_json(profile_response)
         except (json.JSONDecodeError, ValueError):
@@ -452,21 +483,30 @@ class MemoryEngine:
         static = json.dumps(profile_data.get("static_profile", {}))
         dynamic = json.dumps(profile_data.get("dynamic_profile", {}))
 
-        # Upsert profile
-        existing = conn.execute(
-            "SELECT id FROM profiles WHERE entity_name = ?", (entity_name,)
-        ).fetchone()
+        # Phase C: Short write transaction
+        conn = self._conn()
+        try:
+            existing = conn.execute(
+                "SELECT id FROM profiles WHERE entity_name = ?", (entity_name,)
+            ).fetchone()
 
-        if existing:
-            conn.execute(
-                "UPDATE profiles SET static_profile = ?, dynamic_profile = ?, updated_at = datetime('now') WHERE entity_name = ?",
-                (static, dynamic, entity_name),
-            )
-        else:
-            conn.execute(
-                "INSERT INTO profiles (id, entity_name, static_profile, dynamic_profile) VALUES (?, ?, ?, ?)",
-                (str(uuid.uuid4()), entity_name, static, dynamic),
-            )
+            if existing:
+                conn.execute(
+                    "UPDATE profiles SET static_profile = ?, dynamic_profile = ?, "
+                    "updated_at = datetime('now') WHERE entity_name = ?",
+                    (static, dynamic, entity_name),
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO profiles (id, entity_name, static_profile, dynamic_profile) "
+                    "VALUES (?, ?, ?, ?)",
+                    (str(uuid.uuid4()), entity_name, static, dynamic),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+    # _update_profile removed — replaced by _update_profile_safe above
 
     # ── Search ───────────────────────────────────────────────────────────
 
@@ -478,96 +518,100 @@ class MemoryEngine:
         as_of_date: str | None = None,
     ) -> list[dict]:
         """
-        Hybrid search: embed query → cosine similarity → temporal filter → expand relations.
+        Semantic search: embed query, rank by cosine similarity, hydrate top-k only.
+
+        Optimized: Phase 1 loads only id+embedding for ranking (minimal I/O).
+        Phase 2 hydrates full metadata for just the top-k results.
         """
         query_vec = self._embed(query)
 
-        with self._conn() as conn:
+        conn = self._conn()
+        try:
+            # ── Phase 1: Load only id + embedding for ranking ────────────
             if as_of_date:
-                # For as_of_date queries, we need memories that were current at that time.
-                # A memory was current at date X if:
-                #   - It was created on or before X, AND
-                #   - It was not superseded before X (either still current OR superseded after X)
-                rows = conn.execute(
-                    """SELECT id, content, category, confidence, document_date, event_date,
-                              source_session, source_agent, source_chunk, version,
-                              is_current, superseded_by, embedding, created_at
+                # For as_of_date, load candidates and filter in Python
+                id_rows = conn.execute(
+                    """SELECT id, embedding, is_current, superseded_by, document_date
                        FROM memories
-                       WHERE document_date <= ?
-                         AND embedding IS NOT NULL""",
+                       WHERE document_date <= ? AND embedding IS NOT NULL""",
                     (as_of_date,),
                 ).fetchall()
 
                 # Filter: keep memories that were current as of that date
-                # A memory superseded before as_of_date should be excluded if the superseding
-                # memory also existed by then. We approximate by checking if superseded_by exists
-                # and that superseding memory's document_date <= as_of_date.
-                filtered_rows = []
-                for r in rows:
+                filtered = []
+                for r in id_rows:
                     if r["is_current"]:
-                        filtered_rows.append(r)
+                        filtered.append(r)
                     elif r["superseded_by"]:
-                        # Check if the superseding memory was created after as_of_date
                         sup = conn.execute(
                             "SELECT document_date FROM memories WHERE id = ?",
                             (r["superseded_by"],),
                         ).fetchone()
                         if sup and sup["document_date"] > as_of_date:
-                            # Superseding memory didn't exist yet — this was still current
-                            filtered_rows.append(r)
+                            filtered.append(r)
                     else:
-                        filtered_rows.append(r)
-                rows = filtered_rows
+                        filtered.append(r)
+                id_rows = filtered
             elif current_only:
-                rows = conn.execute(
-                    """SELECT id, content, category, confidence, document_date, event_date,
-                              source_session, source_agent, source_chunk, version,
-                              is_current, superseded_by, embedding
-                       FROM memories
-                       WHERE is_current = 1
-                         AND embedding IS NOT NULL"""
+                id_rows = conn.execute(
+                    "SELECT id, embedding FROM memories "
+                    "WHERE is_current = 1 AND embedding IS NOT NULL"
                 ).fetchall()
             else:
-                rows = conn.execute(
-                    """SELECT id, content, category, confidence, document_date, event_date,
-                              source_session, source_agent, source_chunk, version,
-                              is_current, superseded_by, embedding
-                       FROM memories
-                       WHERE embedding IS NOT NULL"""
+                id_rows = conn.execute(
+                    "SELECT id, embedding FROM memories WHERE embedding IS NOT NULL"
                 ).fetchall()
 
-            if not rows:
+            if not id_rows:
                 return []
 
-            # Batch vectorized similarity: stack all embeddings into matrix, single matmul
+            # Build embedding matrix and rank
             embed_dim = len(query_vec)
-            embeddings = np.empty((len(rows), embed_dim), dtype=np.float32)
-            valid_mask = []
-            for i, r in enumerate(rows):
+            byte_len = embed_dim * 4
+            ids = []
+            matrix = np.empty((len(id_rows), embed_dim), dtype=np.float32)
+            valid_count = 0
+
+            for r in id_rows:
                 blob = r["embedding"]
-                if blob and len(blob) == embed_dim * 4:
-                    embeddings[i] = np.frombuffer(blob, dtype=np.float32)
-                    valid_mask.append(True)
-                else:
-                    valid_mask.append(False)
+                if blob and len(blob) == byte_len:
+                    matrix[valid_count] = np.frombuffer(blob, dtype=np.float32)
+                    ids.append(r["id"])
+                    valid_count += 1
 
-            # Single matrix-vector multiply for all similarities at once
-            similarities = embeddings @ query_vec  # (N,) dot products
+            if valid_count == 0:
+                return []
 
-            # Build results with scores
-            scored = []
-            for i, _r in enumerate(rows):
-                if not valid_mask[i]:
-                    continue
-                scored.append((similarities[i], i))
+            matrix = matrix[:valid_count]
+            similarities = matrix @ query_vec
 
-            # Partial sort: only need top_k
-            scored.sort(key=lambda x: x[0], reverse=True)
-            top_indices = scored[:top_k]
+            # Use argpartition for O(n) top-k instead of O(n log n) full sort
+            if valid_count > top_k:
+                top_indices = np.argpartition(similarities, -top_k)[-top_k:]
+                top_indices = top_indices[np.argsort(similarities[top_indices])[::-1]]
+            else:
+                top_indices = np.argsort(similarities)[::-1]
 
+            top_ids = [ids[i] for i in top_indices]
+            top_sims = {ids[i]: float(similarities[i]) for i in top_indices}
+
+            # ── Phase 2: Hydrate full metadata for top-k only ────────────
+            placeholders = ",".join("?" for _ in top_ids)
+            full_rows = conn.execute(
+                f"""SELECT id, content, category, confidence, document_date, event_date,
+                          source_session, source_agent, source_chunk, version,
+                          is_current, superseded_by
+                   FROM memories WHERE id IN ({placeholders})""",
+                top_ids,
+            ).fetchall()
+
+            # Preserve ranking order
+            row_map = {r["id"]: r for r in full_rows}
             results = []
-            for sim, i in top_indices:
-                r = rows[i]
+            for mid in top_ids:
+                r = row_map.get(mid)
+                if not r:
+                    continue
                 results.append(
                     {
                         "id": r["id"],
@@ -580,17 +624,19 @@ class MemoryEngine:
                         "source_chunk": r["source_chunk"],
                         "version": r["version"],
                         "is_current": bool(r["is_current"]),
-                        "similarity": float(sim),
+                        "similarity": top_sims[mid],
                     }
                 )
 
-            # Expand relations for each result
+            # ── Phase 3: Expand relations for results ────────────────────
             for result in results:
-                relations = conn.execute(
-                    """SELECT mr.relation, mr.context, m.content as related_content, m.id as related_id
+                rels = conn.execute(
+                    """SELECT mr.relation, mr.context, m.content as related_content,
+                              m.id as related_id
                        FROM memory_relations mr
                        JOIN memories m ON (
-                           CASE WHEN mr.from_memory = ? THEN mr.to_memory ELSE mr.from_memory END
+                           CASE WHEN mr.from_memory = ? THEN mr.to_memory
+                                ELSE mr.from_memory END
                        ) = m.id
                        WHERE mr.from_memory = ? OR mr.to_memory = ?""",
                     (result["id"], result["id"], result["id"]),
@@ -603,10 +649,12 @@ class MemoryEngine:
                         "related_content": rel["related_content"],
                         "related_id": rel["related_id"],
                     }
-                    for rel in relations
+                    for rel in rels
                 ]
 
             return results
+        finally:
+            conn.close()
 
     # ── History ──────────────────────────────────────────────────────────
 
