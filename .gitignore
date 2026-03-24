@@ -56,4 +56,5 @@ bulk_ingest.log
 bulk_state.json
 *.plist
 docs/*.png
+!docs/benchmark.png
 uv.lock

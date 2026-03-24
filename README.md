@@ -318,9 +318,22 @@ Database tested with 10,000+ memories, 11,000+ relations, 1,000+ entity profiles
 
 ## Benchmark
 
-Tested against [LongMemEval_s](https://xiaowu0162.github.io/long-mem-eval/), the standard benchmark for long-term conversational memory. Supermemory achieves **80% accuracy on fact recall, preferences, temporal reasoning, and knowledge updates** — on par with leading cloud memory systems like [Zep](https://www.getzep.com/) (71%) and [Emergence AI](https://www.emergence.ai/blog/sota-on-longmemeval-with-rag) (82%), while running entirely local on SQLite.
+<p align="center">
+  <img src="docs/benchmark.png" alt="LongMemEval_s benchmark results" width="700"/>
+</p>
 
-Perfect scores on user fact retrieval and preference tracking. 32ms median search latency. No API keys required for core memory operations.
+Tested against [LongMemEval_s](https://xiaowu0162.github.io/long-mem-eval/), the standard benchmark for long-term conversational memory. Supermemory achieves **80% accuracy on fact recall, preferences, temporal reasoning, and knowledge updates**, competitive with cloud memory systems while running entirely local on SQLite.
+
+| Category | Accuracy |
+|----------|----------|
+| User fact retrieval | 100% |
+| Assistant fact recall | 100% |
+| Preference tracking | 100% |
+| Knowledge updates | 67% |
+| Temporal reasoning | 67% |
+| **Overall (production categories)** | **80%** |
+
+32ms median search latency. No API keys required for core memory operations.
 
 Multi-session aggregate reasoning (e.g., "how many X happened this year?") is an active area of development with an event extraction layer shipping in v0.3.0.
 
