@@ -14,9 +14,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/jared-goering/openclaw-supermemory/releases/download/assets/supermemory.mp4">
-    <img src="docs/poster.jpg" alt="▶ Watch Supermemory demo" width="720">
-  </a>
+  <img src="docs/demo.gif" alt="Supermemory demo" width="720">
 </p>
 
 ---
