@@ -1,7 +1,7 @@
 {
   "name": "ultramemory-claw",
   "version": "0.1.0",
-  "description": "Automatic agent memory for OpenClaw — injects relevant memories into every agent turn and extracts new memories from responses. Powered by openclaw-ultramemory.",
+  "description": "Automatic agent memory for OpenClaw — injects relevant memories into every agent turn and extracts new memories from responses. Powered by ultramemory.",
   "type": "module",
   "main": "index.ts",
   "exports": {
@@ -31,7 +31,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/jared-goering/openclaw-ultramemory"
+    "url": "https://github.com/jared-goering/ultramemory"
   },
   "peerDependencies": {
     "openclaw": ">=2026.0.0"

@@ -42,7 +42,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - LLM calls decoupled from write transactions (no DB lock during API calls)
 - Search ranks by ID+embedding only, then lazy-hydrates top-k results (no full-record scan)
 - Moved all modules into `ultramemory/` package (was flat root files)
-- `sentence-transformers` is now an optional dependency: `pip install openclaw-ultramemory[local]`
+- `sentence-transformers` is now an optional dependency: `pip install ultramemory[local]`
 - Replaced personal data in tests/docs with generic examples
 - Health endpoint now reports source chunk count and version
 

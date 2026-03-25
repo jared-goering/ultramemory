@@ -9,13 +9,13 @@ Automatic long-term memory for [OpenClaw](https://openclaw.ai) agents. No agent 
 - **On compaction:** Captures conversation content before it's summarized away
 - **Tool:** Registers `memory_recall` for agents to do targeted deep searches
 
-Powered by [openclaw-ultramemory](https://github.com/jared-goering/openclaw-ultramemory) (SQLite + local embeddings + LLM extraction).
+Powered by [ultramemory](https://github.com/jared-goering/ultramemory) (SQLite + local embeddings + LLM extraction).
 
 ## Install
 
 ```bash
 # 1. Install the memory engine
-pip install openclaw-ultramemory[local]
+pip install ultramemory[local]
 ultramemory init
 ultramemory serve  # starts API on :8642
 
@@ -65,7 +65,7 @@ The memory engine uses LLM-based extraction (Haiku by default) to pull atomic fa
 
 - OpenClaw >= 2026.0.0
 - Python 3.10+
-- `openclaw-ultramemory[local]` package running with `ultramemory serve`
+- `ultramemory[local]` package running with `ultramemory serve`
 
 ## License
 

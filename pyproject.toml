@@ -3,7 +3,7 @@ requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "openclaw-ultramemory"
+name = "ultramemory"
 version = "0.2.1"
 description = "Local-first AI memory engine with relational versioning and temporal grounding"
 readme = "README.md"
@@ -50,9 +50,9 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/jared-goering/openclaw-ultramemory"
-Repository = "https://github.com/jared-goering/openclaw-ultramemory"
-Issues = "https://github.com/jared-goering/openclaw-ultramemory/issues"
+Homepage = "https://github.com/jared-goering/ultramemory"
+Repository = "https://github.com/jared-goering/ultramemory"
+Issues = "https://github.com/jared-goering/ultramemory/issues"
 
 [project.scripts]
 ultramemory = "ultramemory.cli:cli"

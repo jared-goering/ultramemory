@@ -7,9 +7,9 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/jared-goering/openclaw-ultramemory/actions"><img src="https://github.com/jared-goering/openclaw-ultramemory/actions/workflows/test.yml/badge.svg" alt="CI"></a>
-  <a href="https://pypi.org/project/openclaw-ultramemory/"><img src="https://img.shields.io/pypi/v/openclaw-ultramemory.svg" alt="PyPI"></a>
-  <a href="https://pypi.org/project/openclaw-ultramemory/"><img src="https://img.shields.io/pypi/pyversions/openclaw-ultramemory.svg" alt="Python"></a>
+  <a href="https://github.com/jared-goering/ultramemory/actions"><img src="https://github.com/jared-goering/ultramemory/actions/workflows/test.yml/badge.svg" alt="CI"></a>
+  <a href="https://pypi.org/project/ultramemory/"><img src="https://img.shields.io/pypi/v/ultramemory.svg" alt="PyPI"></a>
+  <a href="https://pypi.org/project/ultramemory/"><img src="https://img.shields.io/pypi/pyversions/ultramemory.svg" alt="Python"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License"></a>
 </p>
 
@@ -50,7 +50,7 @@ Everything runs locally with SQLite and on-device embeddings. No cloud dependenc
 ## Quickstart
 
 ```bash
-pip install openclaw-ultramemory[local]   # includes local embeddings (no API needed for search)
+pip install ultramemory[local]   # includes local embeddings (no API needed for search)
 
 export ANTHROPIC_API_KEY=sk-ant-...   # or any litellm-supported provider
 
@@ -340,8 +340,8 @@ Multi-session aggregate reasoning (e.g., "how many X happened this year?") is an
 ## Development
 
 ```bash
-git clone https://github.com/jared-goering/openclaw-ultramemory.git
-cd openclaw-ultramemory
+git clone https://github.com/jared-goering/ultramemory.git
+cd ultramemory
 pip install -e ".[dev]"
 
 # Run tests
