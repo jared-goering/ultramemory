@@ -1,5 +1,5 @@
 /**
- * supermemory-claw — Automatic agent memory plugin for OpenClaw
+ * ultramemory-claw — Automatic agent memory plugin for OpenClaw
  *
  * Hooks into the agent lifecycle to:
  * 1. Inject relevant memories before each agent turn (before_prompt_build)
@@ -29,8 +29,8 @@ type SupermemoryConfig = {
 const DEFAULT_CONFIG: SupermemoryConfig = {
   enabled: true,
   apiUrl: "http://127.0.0.1:8642",
-  topK: 10,
-  minSimilarity: 0.3,
+  topK: 5,
+  minSimilarity: 0.55,
   excludeAgents: [],
   ingestOnOutput: true,
   ingestOnCompaction: true,
@@ -71,7 +71,7 @@ function resolveConfig(raw: Record<string, unknown> | undefined): SupermemoryCon
 // HTTP helpers (lightweight, no external deps)
 // ---------------------------------------------------------------------------
 
-async function supermemoryFetch(
+async function ultramemoryFetch(
   config: SupermemoryConfig,
   path: string,
   options: {
@@ -181,7 +181,7 @@ function fireAndForgetIngest(
 ): void {
   if (!text.trim()) return;
 
-  supermemoryFetch(config, "/api/ingest", {
+  ultramemoryFetch(config, "/api/ingest", {
     method: "POST",
     body: {
       text,
@@ -191,7 +191,7 @@ function fireAndForgetIngest(
     timeoutMs: 30000, // ingest can be slow (LLM extraction)
   }).catch((err: unknown) => {
     const message = err instanceof Error ? err.message : String(err);
-    logger.warn(`[supermemory] Ingest failed (non-blocking): ${message}`);
+    logger.warn(`[ultramemory] Ingest failed (non-blocking): ${message}`);
   });
 }
 
@@ -199,8 +199,8 @@ function fireAndForgetIngest(
 // Plugin definition
 // ---------------------------------------------------------------------------
 
-const supermemoryPlugin = {
-  id: "supermemory-claw",
+const ultramemoryPlugin = {
+  id: "ultramemory-claw",
   name: "Supermemory",
   description:
     "Automatic agent memory — injects relevant memories before each turn, extracts new memories from responses",
@@ -223,22 +223,22 @@ const supermemoryPlugin = {
     );
 
     if (!config.enabled) {
-      api.logger.info("[supermemory] Plugin disabled via config");
+      api.logger.info("[ultramemory] Plugin disabled via config");
       return;
     }
 
     // Verify API is reachable on startup (non-blocking)
-    supermemoryFetch(config, "/api/health", { timeoutMs: 3000 })
+    ultramemoryFetch(config, "/api/health", { timeoutMs: 3000 })
       .then((data) => {
         const health = data as { status?: string; memories?: number; memory_count?: number; version?: string };
         const count = health.memories ?? health.memory_count;
         api.logger.info(
-          `[supermemory] Connected — ${count ?? "?"} memories, v${health.version ?? "?"}`,
+          `[ultramemory] Connected — ${count ?? "?"} memories, v${health.version ?? "?"}`,
         );
       })
       .catch(() => {
         api.logger.warn(
-          `[supermemory] API unreachable at ${config.apiUrl} — memories will not be available until the server starts`,
+          `[ultramemory] API unreachable at ${config.apiUrl} — memories will not be available until the server starts`,
         );
       });
 
@@ -252,7 +252,7 @@ const supermemoryPlugin = {
       if (!query) return;
 
       try {
-        const data = (await supermemoryFetch(config, "/api/search", {
+        const data = (await ultramemoryFetch(config, "/api/search", {
           method: "POST",
           body: {
             query,
@@ -273,7 +273,7 @@ const supermemoryPlugin = {
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : String(err);
         // Silently degrade — agent works fine without memories
-        api.logger.debug?.(`[supermemory] Search failed: ${message}`);
+        api.logger.debug?.(`[ultramemory] Search failed: ${message}`);
       }
     });
 
@@ -348,7 +348,7 @@ const supermemoryPlugin = {
           }
         } catch (err: unknown) {
           const message = err instanceof Error ? err.message : String(err);
-          api.logger.debug?.(`[supermemory] Compaction ingest failed: ${message}`);
+          api.logger.debug?.(`[ultramemory] Compaction ingest failed: ${message}`);
         }
       });
     }
@@ -392,7 +392,7 @@ const supermemoryPlugin = {
         const entity = typeof params.entity === "string" ? params.entity.trim() : undefined;
 
         try {
-          const data = (await supermemoryFetch(config, "/api/search", {
+          const data = (await ultramemoryFetch(config, "/api/search", {
             method: "POST",
             body: {
               query,
@@ -429,9 +429,9 @@ const supermemoryPlugin = {
     }));
 
     api.logger.info(
-      `[supermemory] Plugin registered — topK=${config.topK}, ingestOnOutput=${config.ingestOnOutput}, excludeAgents=[${config.excludeAgents.join(",")}]`,
+      `[ultramemory] Plugin registered — topK=${config.topK}, ingestOnOutput=${config.ingestOnOutput}, excludeAgents=[${config.excludeAgents.join(",")}]`,
     );
   },
 };
 
-export default supermemoryPlugin;
+export default ultramemoryPlugin;

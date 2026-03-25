@@ -32,8 +32,8 @@ In `openclaw.json` under `plugins.entries.ultramemory-claw.config`:
 {
   "enabled": true,
   "apiUrl": "http://127.0.0.1:8642",
-  "topK": 10,
-  "minSimilarity": 0.3,
+  "topK": 5,
+  "minSimilarity": 0.55,
   "ingestOnOutput": true,
   "ingestOnCompaction": true,
   "maxContextTokens": 2000,
@@ -43,9 +43,9 @@ In `openclaw.json` under `plugins.entries.ultramemory-claw.config`:
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `apiUrl` | `http://127.0.0.1:8642` | Ultramemory API endpoint |
-| `topK` | `10` | Max memories to inject per turn |
-| `minSimilarity` | `0.3` | Minimum cosine similarity threshold |
+| `apiUrl` | `http://127.0.0.1:8642` | Supermemory API endpoint |
+| `topK` | `5` | Max memories to inject per turn |
+| `minSimilarity` | `0.55` | Minimum cosine similarity threshold |
 | `ingestOnOutput` | `true` | Auto-extract memories from agent responses |
 | `ingestOnCompaction` | `true` | Capture content before LCM compaction |
 | `maxContextTokens` | `2000` | Token budget for injected memory context |
