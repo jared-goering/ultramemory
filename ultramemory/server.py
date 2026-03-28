@@ -59,7 +59,7 @@ def _build_embedding_cache():
     conn.row_factory = sqlite3.Row
     rows = conn.execute(
         """SELECT id, content, category, confidence, document_date, event_date,
-                  source_session, source_chunk_id, version, is_current, embedding
+                  source_session, source_agent, source_chunk_id, version, is_current, embedding
            FROM memories WHERE is_current = 1 AND embedding IS NOT NULL"""
     ).fetchall()
     conn.close()
@@ -83,6 +83,7 @@ def _build_embedding_cache():
                     "document_date": r["document_date"],
                     "event_date": r["event_date"],
                     "source_session": r["source_session"],
+                    "source_agent": r["source_agent"],
                     "source_chunk_id": r["source_chunk_id"],
                     "version": r["version"],
                     "is_current": bool(r["is_current"]),
@@ -132,6 +133,8 @@ class SearchRequest(BaseModel):
     current_only: bool = True
     as_of_date: str | None = None
     include_source: bool = False
+    agent_id: str | None = None  # Filter results to a specific agent (exact match)
+    agent_id_prefix: str | None = None  # Filter results by agent_id prefix
 
     @field_validator("query")
     @classmethod
@@ -340,7 +343,29 @@ def _search_sync(req: SearchRequest):
         and len(_embed_meta) > 0
     ):
         query_vec = engine._embed(req.query)
-        similarities = _embed_matrix @ query_vec
+
+        # If agent_id filter is set, mask out non-matching memories before ranking
+        agent_filter = req.agent_id or req.agent_id_prefix
+        if agent_filter:
+            is_prefix = req.agent_id_prefix is not None
+            agent_mask = np.array(
+                [
+                    1.0
+                    if (
+                        m is not None
+                        and (
+                            (is_prefix and (m.get("source_agent") or "").startswith(agent_filter))
+                            or (not is_prefix and m.get("source_agent") == agent_filter)
+                        )
+                    )
+                    else 0.0
+                    for m in _embed_meta
+                ],
+                dtype=np.float32,
+            )
+            similarities = (_embed_matrix @ query_vec) * agent_mask
+        else:
+            similarities = _embed_matrix @ query_vec
 
         # O(n) argpartition for top-k
         n = len(similarities)
@@ -356,13 +381,14 @@ def _search_sync(req: SearchRequest):
             meta = _embed_meta[idx]
             if meta is None:
                 continue
+            # Skip zero-similarity entries (masked out by agent_id filter)
+            if agent_filter and similarities[idx] <= 0:
+                continue
             result = {
                 **meta,
                 "similarity": float(similarities[idx]),
                 "relations": [],
             }
-            # Remove source_chunk_id from output (internal ref only)
-            result.pop("source_chunk_id", None)
             results.append(result)
 
         # Hydrate relations (and optionally source_chunks) from DB for top results
@@ -373,11 +399,8 @@ def _search_sync(req: SearchRequest):
 
         # Hydrate source_chunk text if requested
         if req.include_source:
-            chunk_ids = [
-                _embed_meta[idx].get("source_chunk_id")
-                for idx in top_indices
-                if _embed_meta[idx] is not None and _embed_meta[idx].get("source_chunk_id")
-            ]
+            # Collect chunk IDs from actual results (not all top_indices, which may have been filtered)
+            chunk_ids = [r.get("source_chunk_id") for r in results if r.get("source_chunk_id")]
             if chunk_ids:
                 placeholders = ",".join("?" for _ in chunk_ids)
                 chunk_rows = conn.execute(
@@ -385,10 +408,9 @@ def _search_sync(req: SearchRequest):
                     chunk_ids,
                 ).fetchall()
                 chunk_map = {r["id"]: r["content"] for r in chunk_rows}
-                for r_idx, idx in enumerate(top_indices):
-                    meta = _embed_meta[idx]
-                    if meta and meta.get("source_chunk_id"):
-                        results[r_idx]["source_chunk"] = chunk_map.get(meta["source_chunk_id"])
+                for r in results:
+                    if r.get("source_chunk_id"):
+                        r["source_chunk"] = chunk_map.get(r["source_chunk_id"])
 
         for result in results:
             rels = conn.execute(
@@ -412,6 +434,10 @@ def _search_sync(req: SearchRequest):
                 for rel in rels
             ]
         conn.close()
+        # Remove internal fields from output
+        for r in results:
+            r.pop("source_chunk_id", None)
+            r.pop("source_agent", None)
         return {"results": results, "count": len(results)}
 
     # Fallback to engine.search for as_of_date or non-current queries
@@ -421,6 +447,13 @@ def _search_sync(req: SearchRequest):
         current_only=req.current_only,
         as_of_date=req.as_of_date,
     )
+    # Post-filter by agent_id if specified (engine.search doesn't support it natively)
+    if req.agent_id:
+        results = [r for r in results if r.get("source_agent") == req.agent_id]
+    elif req.agent_id_prefix:
+        results = [
+            r for r in results if (r.get("source_agent") or "").startswith(req.agent_id_prefix)
+        ]
     if not req.include_source:
         for r in results:
             r.pop("source_chunk", None)
