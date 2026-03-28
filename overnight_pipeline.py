@@ -311,6 +311,103 @@ def step4_backfill_prod():
     return result.returncode == 0
 
 
+# ─── Step 5: Full memorybench eval with Gemini embeddings ─────────────
+def step5_full_eval():
+    log("=" * 60)
+    log("STEP 5: Running full memorybench evaluation suite")
+    log("=" * 60)
+
+    memorybench_dir = os.path.expanduser("~/Projects/memorybench")
+    if not os.path.isdir(memorybench_dir):
+        log("memorybench directory not found! Skipping.")
+        return False
+
+    # Start a fresh eval server on port 8643 (memorybench default) with normal mode
+    # Using a FRESH eval DB so memorybench does its own ingestion
+    eval_db_fresh = "/tmp/memorybench_fulleval.db"
+    log(f"Starting eval server on :8643 with fresh DB: {eval_db_fresh}")
+
+    # Kill any existing server on 8643
+    subprocess.run("lsof -ti :8643 | xargs kill -9 2>/dev/null", shell=True)
+    time.sleep(1)
+
+    google_key = os.environ.get("GOOGLE_API_KEY", "")
+    server_env = os.environ.copy()
+    server_env.update({
+        "ULTRAMEMORY_DB_PATH": eval_db_fresh,
+        "ULTRAMEMORY_EMBEDDING_PROVIDER": "litellm",
+        "ULTRAMEMORY_EMBEDDING_MODEL": "gemini/gemini-embedding-2-preview",
+        "ULTRAMEMORY_MODEL": "gemini/gemini-2.5-flash",
+        "GOOGLE_API_KEY": google_key,
+        "GEMINI_API_KEY": google_key,
+    })
+    # Remove fast ingest flag — we want full pipeline for eval
+    server_env.pop("ULTRAMEMORY_FAST_INGEST", None)
+    server_env.pop("ULTRAMEMORY_SKIP_FACTS", None)
+    server_env.pop("ULTRAMEMORY_SKIP_PROFILES", None)
+
+    server_proc = subprocess.Popen(
+        ["uvicorn", "ultramemory.server:app", "--port", "8643"],
+        cwd=os.path.expanduser("~/Projects/openclaw-memory"),
+        env=server_env,
+        stdout=open("/tmp/eval_fulleval_server.log", "w"),
+        stderr=subprocess.STDOUT,
+    )
+    time.sleep(10)
+
+    if not check_server("http://127.0.0.1:8643", "Full eval server"):
+        log("Failed to start full eval server!")
+        server_proc.kill()
+        return False
+
+    # Run memorybench for each benchmark: longmemeval, locomo, convomem
+    # Use gemini-2.5-flash as judge (cheaper than GPT-4o)
+    benchmarks = ["longmemeval"]  # start with longmemeval; add others if available
+    run_id = "eval-gemini-emb2"
+    judge = "gemini-2.5-flash"
+    answering_model = "gemini-2.5-flash"
+
+    bench_env = os.environ.copy()
+    bench_env.update({
+        "OPENCLAW_SUPERMEMORY_URL": "http://127.0.0.1:8643",
+        "GOOGLE_API_KEY": google_key,
+        "GEMINI_API_KEY": google_key,
+    })
+
+    all_ok = True
+    for bench in benchmarks:
+        log(f"Running {bench} benchmark (run: {run_id})...")
+        result = subprocess.run(
+            [
+                "bun", "run", "src/index.ts", "run",
+                "-p", "openclaw-supermemory",
+                "-b", bench,
+                "-j", judge,
+                "-m", answering_model,
+                "-r", run_id,
+            ],
+            cwd=memorybench_dir,
+            env=bench_env,
+            capture_output=True,
+            text=True,
+            timeout=14400,  # 4 hours per benchmark
+        )
+        log(f"{bench} output (last 3000 chars):")
+        log(result.stdout[-3000:])
+        if result.returncode != 0:
+            log(f"{bench} stderr: {result.stderr[-1000:]}")
+            all_ok = False
+
+    # Clean up server
+    server_proc.terminate()
+    try:
+        server_proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        server_proc.kill()
+
+    return all_ok
+
+
 # ─── Main ─────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     log("🌙 Starting overnight pipeline")
@@ -323,6 +420,7 @@ if __name__ == "__main__":
     results["step2"] = step2_backfill_eval()
     results["step3"] = step3_benchmark()
     results["step4"] = step4_backfill_prod()
+    results["step5"] = step5_full_eval()
 
     log("=" * 60)
     log("🌅 OVERNIGHT PIPELINE COMPLETE")
