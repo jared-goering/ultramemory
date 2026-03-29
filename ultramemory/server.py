@@ -716,11 +716,31 @@ def _counting_search_sync(req: SearchRequest):
 def _temporal_search_sync(req: SearchRequest):
     """Temporal route: embedding search + date-aware structured_facts + event_clusters.
 
-    Returns results sorted by date with timeline metadata.
+    Uses deterministic temporal resolution to filter by date window and injects
+    pre-computed temporal context for the answer LLM.
     """
+    from datetime import date as _date
+
+    from ultramemory.temporal import (
+        DateRange,
+        filter_by_date_window,
+        inject_temporal_context,
+        resolve_temporal_expression,
+    )
+
     # Determine sort direction from query
     query_lower = req.query.lower()
     oldest_first = bool(re.search(r"\b(?:first time|earliest|oldest)\b", query_lower))
+
+    # Resolve temporal expression deterministically
+    reference_date = _date.today()
+    if req.as_of_date:
+        try:
+            reference_date = _date.fromisoformat(req.as_of_date[:10])
+        except (ValueError, TypeError):
+            pass
+
+    resolved_temporal = resolve_temporal_expression(req.query, reference_date)
 
     # Phase 1: Broad embedding search
     wide_req = SearchRequest(
@@ -747,6 +767,19 @@ def _temporal_search_sync(req: SearchRequest):
     col_prefix = "sf." if use_agent_join else ""
     fact_conditions = [f"{col_prefix}date IS NOT NULL"]
     fact_params: list = []
+
+    # Add date window filter if temporal expression was resolved
+    if resolved_temporal is not None:
+        from datetime import timedelta as _td
+
+        if isinstance(resolved_temporal, DateRange):
+            window_start = (resolved_temporal.start - _td(days=3)).isoformat()
+            window_end = (resolved_temporal.end + _td(days=3)).isoformat()
+        else:
+            window_start = (resolved_temporal - _td(days=3)).isoformat()
+            window_end = (resolved_temporal + _td(days=3)).isoformat()
+        fact_conditions.append(f"{col_prefix}date >= ? AND {col_prefix}date <= ?")
+        fact_params.extend([window_start, window_end])
 
     if agent_filter:
         if req.agent_id:
@@ -818,11 +851,28 @@ def _temporal_search_sync(req: SearchRequest):
 
     conn.close()
 
+    # If resolved temporal and 0 embedding results, try wider window (14 days)
+    if resolved_temporal is not None and len(memories) == 0:
+        wider_window = 14
+        filtered_memories = filter_by_date_window(
+            base_results.get("results", []) if not memories else [],
+            resolved_temporal,
+            window_days=wider_window,
+        )
+        if filtered_memories:
+            memories = filtered_memories
+
     # Sort memories by date (document_date or event_date)
     def _date_key(m: dict) -> str:
         return m.get("document_date") or m.get("event_date") or ""
 
     memories_sorted = sorted(memories, key=_date_key, reverse=not oldest_first)
+
+    # Filter memories by date window if temporal expression was resolved
+    if resolved_temporal is not None and memories_sorted:
+        date_filtered = filter_by_date_window(memories_sorted, resolved_temporal, window_days=7)
+        if date_filtered:
+            memories_sorted = date_filtered
 
     # Build timeline from facts + clusters
     timeline: list[dict] = []
@@ -858,6 +908,26 @@ def _temporal_search_sync(req: SearchRequest):
     # Sort timeline
     timeline.sort(key=lambda t: t.get("date") or "", reverse=not oldest_first)
 
+    # Generate pre-computed temporal context for the answer LLM
+    temporal_context = inject_temporal_context(
+        req.query, memories_sorted[: req.top_k], reference_date
+    )
+
+    # Build resolved date metadata
+    resolved_meta = None
+    if resolved_temporal is not None:
+        if isinstance(resolved_temporal, DateRange):
+            resolved_meta = {
+                "type": "range",
+                "start": resolved_temporal.start.isoformat(),
+                "end": resolved_temporal.end.isoformat(),
+            }
+        else:
+            resolved_meta = {
+                "type": "date",
+                "date": resolved_temporal.isoformat(),
+            }
+
     return {
         "results": memories_sorted[: req.top_k],
         "count": len(memories_sorted[: req.top_k]),
@@ -867,6 +937,9 @@ def _temporal_search_sync(req: SearchRequest):
             "sort_order": "oldest_first" if oldest_first else "most_recent_first",
             "fact_count": len(dated_facts),
             "cluster_count": len(event_clusters),
+            "resolved_temporal": resolved_meta,
+            "temporal_context": temporal_context,
+            "reference_date": reference_date.isoformat(),
         },
     }
 
