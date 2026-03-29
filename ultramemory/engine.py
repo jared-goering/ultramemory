@@ -178,6 +178,9 @@ CREATE TABLE IF NOT EXISTS structured_facts (
     date TEXT,
     confidence REAL DEFAULT 1.0,
     is_user_action BOOLEAN DEFAULT 1,
+    participants TEXT,
+    event_type TEXT,
+    canonical_event_id TEXT,
     created_at TEXT DEFAULT (datetime('now')),
     FOREIGN KEY (memory_id) REFERENCES memories(id),
     FOREIGN KEY (source_chunk_id) REFERENCES source_chunks(id)
@@ -187,6 +190,7 @@ CREATE INDEX IF NOT EXISTS idx_structured_facts_memory ON structured_facts(memor
 CREATE INDEX IF NOT EXISTS idx_structured_facts_type ON structured_facts(fact_type, category);
 CREATE INDEX IF NOT EXISTS idx_structured_facts_category ON structured_facts(category);
 CREATE INDEX IF NOT EXISTS idx_structured_facts_session ON structured_facts(session_key);
+CREATE INDEX IF NOT EXISTS idx_structured_facts_canonical ON structured_facts(canonical_event_id);
 """
 
 # ── LLM Prompts ──────────────────────────────────────────────────────────────
@@ -253,29 +257,38 @@ Conversation text:
 
 Return ONLY a JSON array of event objects, no other text. Return empty array [] if no events found."""
 
-FACT_EXTRACT_PROMPT = """Extract quantifiable, structured facts from this conversation text.
-A fact is a measurable assertion: a count, duration, cost, attendance, distance, etc.
+FACT_EXTRACT_PROMPT = """Extract structured facts from this conversation text.
+A fact is ANY user action, experience, or measurable assertion — events attended, activities done, places visited, things bought, durations, costs, counts, etc.
 
 For each fact, return a JSON object with:
-- "fact_type": one of "quantity", "attendance", "duration", "cost", "count", "distance", "frequency"
-- "category": broad topic (e.g. "gaming", "wedding", "exercise", "travel", "social", "cooking", "work", "shopping", "health", "education")
-- "subject": what or who — the specific thing (e.g. "Assassin's Creed Odyssey", "cousin Rachel's wedding", "marathon training")
-- "predicate": the action verb (e.g. "played", "attended", "spent", "ran", "bought", "cooked")
-- "value": numeric value (e.g. 70 for 70 hours, 1 for a single attendance, 270 for $270). Use null if no number is stated.
-- "unit": measurement unit (e.g. "hours", "count", "dollars", "minutes", "miles", "sessions")
+- "fact_type": one of "event", "quantity", "attendance", "duration", "cost", "count", "distance", "frequency"
+  Use "event" for any activity/experience the user did (went somewhere, attended something, participated in something) even if no number is mentioned.
+  Use "attendance" specifically for events with explicit attendance context (weddings, concerts, parties, ceremonies).
+  Use the other types when a specific measurement is stated.
+- "category": broad topic (e.g. "gaming", "wedding", "exercise", "travel", "social", "cooking", "work", "shopping", "health", "education", "entertainment", "family", "hobby")
+- "subject": what or who — the specific thing (e.g. "Assassin's Creed Odyssey", "cousin Rachel's wedding", "marathon training", "Denver trip")
+- "predicate": the action verb (e.g. "played", "attended", "spent", "ran", "bought", "cooked", "visited", "went to", "participated in")
+- "value": numeric value if stated (e.g. 70 for 70 hours, 270 for $270). For events/attendance without a number, use 1.
+- "unit": measurement unit (e.g. "hours", "occurrence", "dollars", "minutes", "miles", "sessions", "count"). Use "occurrence" for events without a specific unit.
 - "date": ISO date string if known, otherwise null
-- "confidence": float 0-1 (1.0 = explicitly stated number, 0.7 = clearly implied, 0.4 = rough estimate)
+- "confidence": float 0-1 (1.0 = explicitly stated, 0.7 = clearly implied, 0.4 = rough estimate)
 - "is_user_action": true if the USER did/experienced this, false if it's metadata or about someone else
+- "participants": array of named people involved (e.g. ["Rachel", "Mike"]) or empty array if none mentioned
+- "event_type": optional string for event categorization (e.g. "wedding", "concert", "trip", "game_session", "dinner", "class"). Null if not applicable.
 
 CRITICAL RULES:
+- Extract EVERY activity, event, or experience the user describes. "I went to X", "I attended Y", "I visited Z", "I tried W" should ALL produce a fact.
 - ONLY extract facts where the USER personally did something (is_user_action=true) unless it's clearly about someone else (set is_user_action=false).
-- For gaming: "I played Assassin's Creed for 70 hours" → is_user_action=true, value=70, unit="hours"
-  But "Assassin's Creed typically takes 60-100 hours to complete" → is_user_action=false (game metadata)
-- For weddings: "I attended my cousin Rachel's wedding" → fact_type="attendance", category="wedding", value=1, unit="count", is_user_action=true
-  But "Rachel is planning her wedding" → do NOT extract (no user action yet)
-- For duration/cost: only extract if a specific number is mentioned or strongly implied.
+- For events without numbers: fact_type="event", value=1, unit="occurrence". ALWAYS extract these — do NOT skip events just because no number is mentioned.
+- For gaming: "I played Assassin's Creed for 70 hours" → fact_type="duration", value=70, unit="hours"
+  "I played Assassin's Creed" (no hours) → fact_type="event", value=1, unit="occurrence"
+  "Assassin's Creed typically takes 60-100 hours to complete" → is_user_action=false (game metadata)
+- For weddings/events: "I went to cousin Rachel's wedding" → fact_type="attendance", value=1, unit="occurrence", participants=["Rachel"], event_type="wedding"
+  "I flew to Denver for a wedding" → fact_type="attendance", value=1, unit="occurrence", event_type="wedding"
+  "Rachel is planning her wedding" → do NOT extract (no user action yet)
+- For duration/cost: extract the specific number when mentioned.
 - Each distinct user action = one fact. Do NOT merge multiple actions into one.
-- If the user mentions attending an event, that's fact_type="attendance" with value=1, unit="count".
+- Be AGGRESSIVE about extracting user actions. When in doubt, extract it.
 
 Document date for temporal reference: {document_date}
 
@@ -284,7 +297,7 @@ Conversation text:
 {text}
 ---
 
-Return ONLY a JSON array of fact objects, no other text. Return empty array [] if no quantifiable facts found."""
+Return ONLY a JSON array of fact objects, no other text. Return empty array [] if no user actions or facts found."""
 
 PROFILE_PROMPT = """Given these memories about the entity "{entity_name}", build a profile.
 
@@ -339,6 +352,17 @@ class MemoryEngine:
                 conn.execute("ALTER TABLE memories ADD COLUMN source_chunk_id TEXT")
                 conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_memories_chunk ON memories(source_chunk_id)"
+                )
+            # Migration: add new columns to structured_facts for canonical dedup
+            sf_cols = {r[1] for r in conn.execute("PRAGMA table_info(structured_facts)").fetchall()}
+            if "participants" not in sf_cols:
+                conn.execute("ALTER TABLE structured_facts ADD COLUMN participants TEXT")
+            if "event_type" not in sf_cols:
+                conn.execute("ALTER TABLE structured_facts ADD COLUMN event_type TEXT")
+            if "canonical_event_id" not in sf_cols:
+                conn.execute("ALTER TABLE structured_facts ADD COLUMN canonical_event_id TEXT")
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_structured_facts_canonical ON structured_facts(canonical_event_id)"
                 )
 
     def _conn(self) -> sqlite3.Connection:
@@ -1285,6 +1309,109 @@ class MemoryEngine:
         parts.append(normalized_date or "")
         return "|".join(parts)
 
+    # ── Canonical Event ID ─────────────────────────────────────────────
+
+    def _find_canonical_event_id(
+        self,
+        conn: sqlite3.Connection,
+        event_type: str | None,
+        category: str,
+        date: str | None,
+        participants: list[str],
+        session_key: str,
+    ) -> str:
+        """Find or create a canonical_event_id for dedup.
+
+        Matching rules:
+        - Same event_type or category
+        - Overlapping date (within 3 days)
+        - Any shared participant name
+
+        If no match found, generate a new canonical ID.
+        """
+        from datetime import datetime as _dt
+
+        # Normalize inputs for matching
+        participant_set = {p.lower().strip() for p in participants if p}
+
+        def _parse_date(s: str | None) -> _dt | None:
+            if not s:
+                return None
+            for fmt in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"):
+                try:
+                    return _dt.strptime(s[:19], fmt)
+                except (ValueError, IndexError):
+                    continue
+            return None
+
+        # Parse date for proximity matching
+        fact_date = _parse_date(date)
+
+        # Search existing facts for a canonical match
+        conditions = ["canonical_event_id IS NOT NULL"]
+        params: list = []
+
+        # Match by event_type or category
+        if event_type:
+            conditions.append("(event_type = ? OR category LIKE ?)")
+            params.extend([event_type.lower().strip(), f"%{category.lower().strip()}%"])
+        else:
+            conditions.append("category LIKE ?")
+            params.append(f"%{category.lower().strip()}%")
+
+        where = " AND ".join(conditions)
+        rows = conn.execute(
+            f"""SELECT canonical_event_id, event_type, category, date,
+                       participants, session_key
+                FROM structured_facts
+                WHERE {where}
+                GROUP BY canonical_event_id
+                ORDER BY created_at DESC
+                LIMIT 200""",
+            params,
+        ).fetchall()
+
+        for row in rows:
+            row_date_str = row["date"]
+            row_participants_raw = row["participants"] or "[]"
+            try:
+                row_participants = set(
+                    p.lower().strip() for p in json.loads(row_participants_raw) if p
+                )
+            except (json.JSONDecodeError, TypeError):
+                row_participants = set()
+
+            # Check date proximity (within 3 days)
+            date_match = False
+            if fact_date and row_date_str:
+                row_date = _parse_date(row_date_str)
+                if row_date and abs((fact_date - row_date).days) <= 3:
+                    date_match = True
+            elif not fact_date and not row_date_str:
+                # Both have no date — consider date as matching (rely on other signals)
+                date_match = True
+
+            # Check shared participants
+            shared_participants = participant_set & row_participants
+
+            # Match if: date overlaps AND any shared participant
+            if date_match and shared_participants:
+                return row["canonical_event_id"]
+
+            # Also match if: same event_type AND date overlaps AND both have no participants
+            row_event_type = (row["event_type"] or "").lower().strip()
+            if (
+                date_match
+                and event_type
+                and row_event_type == event_type.lower().strip()
+                and not participant_set
+                and not row_participants
+            ):
+                return row["canonical_event_id"]
+
+        # No match found — generate a new canonical_event_id
+        return str(uuid.uuid4())
+
     # ── Structured Fact Extraction ──────────────────────────────────────
 
     def extract_facts(
@@ -1355,6 +1482,17 @@ class MemoryEngine:
                 date = fact.get("date")
                 confidence = fact.get("confidence", 1.0)
                 is_user_action = fact.get("is_user_action", True)
+                participants = fact.get("participants", [])
+                if not isinstance(participants, list):
+                    participants = []
+                participants_json = json.dumps(sorted(p.strip() for p in participants if p))
+                event_type_val = (fact.get("event_type") or "").strip() or None
+
+                # Compute canonical_event_id for dedup:
+                # Same event_type/category + overlapping date (within 3 days) + any shared participant
+                canonical_id = self._find_canonical_event_id(
+                    conn, event_type_val, category, date, participants, session_key
+                )
 
                 # Create one fact row per linked memory
                 for memory_id in memory_ids:
@@ -1363,8 +1501,9 @@ class MemoryEngine:
                         """INSERT INTO structured_facts
                            (id, memory_id, source_chunk_id, session_key,
                             fact_type, category, subject, predicate,
-                            value, unit, date, confidence, is_user_action)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                            value, unit, date, confidence, is_user_action,
+                            participants, event_type, canonical_event_id)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                         (
                             fact_id,
                             memory_id,
@@ -1379,6 +1518,9 @@ class MemoryEngine:
                             date,
                             confidence,
                             1 if is_user_action else 0,
+                            participants_json,
+                            event_type_val,
+                            canonical_id,
                         ),
                     )
 
@@ -1393,6 +1535,9 @@ class MemoryEngine:
                         "date": date,
                         "confidence": confidence,
                         "is_user_action": is_user_action,
+                        "participants": participants,
+                        "event_type": event_type_val,
+                        "canonical_event_id": canonical_id,
                         "linked_memories": len(memory_ids),
                     }
                 )

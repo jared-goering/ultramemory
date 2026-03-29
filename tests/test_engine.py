@@ -666,5 +666,466 @@ class TestAggregateEndpoint(unittest.TestCase):
         conn.close()
 
 
+class TestEventFactExtraction(unittest.TestCase):
+    """Test that non-quantifiable events produce structured_facts (Problem 1)."""
+
+    def setUp(self):
+        self.db_fd, self.db_path = tempfile.mkstemp(suffix=".db")
+        self.engine = MemoryEngine(db_path=self.db_path)
+        self.engine._embedder = make_mock_embedder()
+
+    def tearDown(self):
+        os.close(self.db_fd)
+        os.unlink(self.db_path)
+
+    def test_event_without_number_produces_fact(self):
+        """'I went to cousin Rachel's wedding' should produce a fact even without a number."""
+
+        # Mock LLM to return an event-type fact
+        def fact_llm(prompt):
+            if "Extract structured facts" in prompt:
+                return json.dumps(
+                    [
+                        {
+                            "fact_type": "event",
+                            "category": "wedding",
+                            "subject": "cousin Rachel's wedding",
+                            "predicate": "attended",
+                            "value": 1,
+                            "unit": "occurrence",
+                            "date": "2025-06-15",
+                            "confidence": 1.0,
+                            "is_user_action": True,
+                            "participants": ["Rachel"],
+                            "event_type": "wedding",
+                        }
+                    ]
+                )
+            elif "Extract atomic memories" in prompt:
+                return json.dumps(
+                    [
+                        {
+                            "content": "User attended cousin Rachel's wedding",
+                            "category": "social",
+                            "event_date": "2025-06-15",
+                            "confidence": 1.0,
+                            "entities": ["Rachel"],
+                        }
+                    ]
+                )
+            elif "build a profile" in prompt:
+                return json.dumps({"static_profile": {}, "dynamic_profile": {}})
+            return "[]"
+
+        self.engine._llm_call = fact_llm
+        self.engine.ingest(
+            "I went to cousin Rachel's wedding last June. It was beautiful.",
+            session_key="s1",
+            agent_id="user_alice",
+        )
+
+        conn = self.engine._conn()
+        facts = conn.execute("SELECT * FROM structured_facts").fetchall()
+        conn.close()
+
+        self.assertGreater(len(facts), 0, "Should have extracted at least one fact")
+        fact = dict(facts[0])
+        self.assertEqual(fact["fact_type"], "event")
+        self.assertEqual(fact["category"], "wedding")
+        self.assertIn("rachel", fact["subject"].lower())
+        self.assertEqual(fact["value"], 1.0)
+        self.assertEqual(fact["unit"], "occurrence")
+        self.assertTrue(fact["is_user_action"])
+
+    def test_event_fact_has_participants_and_event_type(self):
+        """Extracted facts should include participants and event_type fields."""
+
+        def fact_llm(prompt):
+            if "Extract structured facts" in prompt:
+                return json.dumps(
+                    [
+                        {
+                            "fact_type": "attendance",
+                            "category": "wedding",
+                            "subject": "Mike and Rachel's wedding",
+                            "predicate": "attended",
+                            "value": 1,
+                            "unit": "occurrence",
+                            "date": "2025-06-15",
+                            "confidence": 1.0,
+                            "is_user_action": True,
+                            "participants": ["Mike", "Rachel"],
+                            "event_type": "wedding",
+                        }
+                    ]
+                )
+            elif "Extract atomic memories" in prompt:
+                return json.dumps(
+                    [
+                        {
+                            "content": "User attended Mike and Rachel's wedding",
+                            "category": "social",
+                            "event_date": "2025-06-15",
+                            "confidence": 1.0,
+                            "entities": ["Mike", "Rachel"],
+                        }
+                    ]
+                )
+            elif "build a profile" in prompt:
+                return json.dumps({"static_profile": {}, "dynamic_profile": {}})
+            return "[]"
+
+        self.engine._llm_call = fact_llm
+        self.engine.ingest(
+            "I attended Mike and Rachel's wedding on June 15th.",
+            session_key="s1",
+            agent_id="user_alice",
+        )
+
+        conn = self.engine._conn()
+        facts = conn.execute("SELECT * FROM structured_facts").fetchall()
+        conn.close()
+
+        self.assertGreater(len(facts), 0)
+        fact = dict(facts[0])
+        self.assertIsNotNone(fact["participants"])
+        participants = json.loads(fact["participants"])
+        self.assertIn("Mike", participants)
+        self.assertIn("Rachel", participants)
+        self.assertEqual(fact["event_type"], "wedding")
+        self.assertIsNotNone(fact["canonical_event_id"])
+
+
+class TestCanonicalEventDedup(unittest.TestCase):
+    """Test canonical event clustering (Problem 2)."""
+
+    def setUp(self):
+        self.db_fd, self.db_path = tempfile.mkstemp(suffix=".db")
+        self.engine = MemoryEngine(db_path=self.db_path)
+        self.engine._embedder = make_mock_embedder()
+
+    def tearDown(self):
+        os.close(self.db_fd)
+        os.unlink(self.db_path)
+
+    def test_same_event_different_descriptions_cluster_together(self):
+        """'Rachel's wedding in June' and 'flew to Denver for a wedding' with same date/participants should share canonical_event_id."""
+        call_count = {"extract": 0, "facts": 0}
+
+        def fact_llm(prompt):
+            if "Extract structured facts" in prompt:
+                call_count["facts"] += 1
+                if call_count["facts"] == 1:
+                    return json.dumps(
+                        [
+                            {
+                                "fact_type": "attendance",
+                                "category": "wedding",
+                                "subject": "Rachel's wedding in June",
+                                "predicate": "attended",
+                                "value": 1,
+                                "unit": "occurrence",
+                                "date": "2025-06-15",
+                                "confidence": 1.0,
+                                "is_user_action": True,
+                                "participants": ["Rachel"],
+                                "event_type": "wedding",
+                            }
+                        ]
+                    )
+                else:
+                    return json.dumps(
+                        [
+                            {
+                                "fact_type": "event",
+                                "category": "travel",
+                                "subject": "flew to Denver for a wedding",
+                                "predicate": "flew",
+                                "value": 1,
+                                "unit": "occurrence",
+                                "date": "2025-06-14",
+                                "confidence": 0.9,
+                                "is_user_action": True,
+                                "participants": ["Rachel"],
+                                "event_type": "wedding",
+                            }
+                        ]
+                    )
+            elif "Extract atomic memories" in prompt:
+                call_count["extract"] += 1
+                # Return unique content per call to avoid dedup
+                if call_count["extract"] == 1:
+                    return json.dumps(
+                        [
+                            {
+                                "content": "User attended Rachel's wedding in June",
+                                "category": "social",
+                                "event_date": "2025-06-15",
+                                "confidence": 1.0,
+                                "entities": ["Rachel"],
+                            }
+                        ]
+                    )
+                else:
+                    return json.dumps(
+                        [
+                            {
+                                "content": "User flew to Denver for Rachel's wedding",
+                                "category": "social",
+                                "event_date": "2025-06-14",
+                                "confidence": 1.0,
+                                "entities": ["Rachel"],
+                            }
+                        ]
+                    )
+            elif "build a profile" in prompt:
+                return json.dumps({"static_profile": {}, "dynamic_profile": {}})
+            return "[]"
+
+        self.engine._llm_call = fact_llm
+
+        # Ingest two descriptions of the same event
+        self.engine.ingest(
+            "I went to Rachel's wedding in June. It was lovely.",
+            session_key="s1",
+            agent_id="user_alice",
+        )
+        self.engine.ingest(
+            "I flew to Denver for a wedding. Rachel looked amazing.",
+            session_key="s2",
+            agent_id="user_alice",
+        )
+
+        conn = self.engine._conn()
+        facts = conn.execute(
+            "SELECT canonical_event_id FROM structured_facts WHERE canonical_event_id IS NOT NULL"
+        ).fetchall()
+        conn.close()
+
+        self.assertGreater(len(facts), 1, "Should have at least 2 facts")
+        canonical_ids = set(r["canonical_event_id"] for r in facts)
+        self.assertEqual(
+            len(canonical_ids),
+            1,
+            f"Both facts should share the same canonical_event_id, got {canonical_ids}",
+        )
+
+    def test_different_events_get_different_canonical_ids(self):
+        """Events with different dates and participants should get different canonical IDs."""
+        call_count = {"extract": 0, "facts": 0}
+
+        def fact_llm(prompt):
+            if "Extract structured facts" in prompt:
+                call_count["facts"] += 1
+                if call_count["facts"] == 1:
+                    return json.dumps(
+                        [
+                            {
+                                "fact_type": "attendance",
+                                "category": "wedding",
+                                "subject": "Rachel's wedding",
+                                "predicate": "attended",
+                                "value": 1,
+                                "unit": "occurrence",
+                                "date": "2025-06-15",
+                                "confidence": 1.0,
+                                "is_user_action": True,
+                                "participants": ["Rachel"],
+                                "event_type": "wedding",
+                            }
+                        ]
+                    )
+                else:
+                    return json.dumps(
+                        [
+                            {
+                                "fact_type": "attendance",
+                                "category": "wedding",
+                                "subject": "Emily's wedding",
+                                "predicate": "attended",
+                                "value": 1,
+                                "unit": "occurrence",
+                                "date": "2025-09-20",
+                                "confidence": 1.0,
+                                "is_user_action": True,
+                                "participants": ["Emily"],
+                                "event_type": "wedding",
+                            }
+                        ]
+                    )
+            elif "Extract atomic memories" in prompt:
+                call_count["extract"] += 1
+                if call_count["extract"] == 1:
+                    return json.dumps(
+                        [
+                            {
+                                "content": "User attended Rachel's wedding in June",
+                                "category": "social",
+                                "event_date": "2025-06-15",
+                                "confidence": 1.0,
+                                "entities": ["Rachel"],
+                            }
+                        ]
+                    )
+                else:
+                    return json.dumps(
+                        [
+                            {
+                                "content": "User went to Emily's wedding in September",
+                                "category": "social",
+                                "event_date": "2025-09-20",
+                                "confidence": 1.0,
+                                "entities": ["Emily"],
+                            }
+                        ]
+                    )
+            elif "build a profile" in prompt:
+                return json.dumps({"static_profile": {}, "dynamic_profile": {}})
+            return "[]"
+
+        self.engine._llm_call = fact_llm
+
+        self.engine.ingest(
+            "I attended Rachel's wedding in June.",
+            session_key="s1",
+            agent_id="user_alice",
+        )
+        self.engine.ingest(
+            "I went to Emily's wedding in September.",
+            session_key="s2",
+            agent_id="user_alice",
+        )
+
+        conn = self.engine._conn()
+        facts = conn.execute(
+            "SELECT canonical_event_id, subject FROM structured_facts WHERE canonical_event_id IS NOT NULL"
+        ).fetchall()
+        conn.close()
+
+        self.assertGreater(len(facts), 1)
+        canonical_ids = set(r["canonical_event_id"] for r in facts)
+        self.assertEqual(
+            len(canonical_ids),
+            2,
+            f"Different events should have different canonical IDs, got {canonical_ids}",
+        )
+
+
+class TestAgentIdFilteringAggregate(unittest.TestCase):
+    """Test agent_id filtering in aggregate endpoints (Problem 3)."""
+
+    def setUp(self):
+        self.db_fd, self.db_path = tempfile.mkstemp(suffix=".db")
+        self.engine = MemoryEngine(db_path=self.db_path)
+        self.engine._embedder = make_mock_embedder()
+
+    def tearDown(self):
+        os.close(self.db_fd)
+        os.unlink(self.db_path)
+
+    def test_aggregate_filters_by_agent_id_prefix(self):
+        """Aggregate should only count facts belonging to the specified agent."""
+        import sqlite3
+
+        call_count = {"extract": 0, "facts": 0}
+
+        def fact_llm(prompt):
+            if "Extract structured facts" in prompt:
+                call_count["facts"] += 1
+                agent = "alice" if call_count["facts"] <= 1 else "bob"
+                return json.dumps(
+                    [
+                        {
+                            "fact_type": "event",
+                            "category": "wedding",
+                            "subject": f"{agent}'s friend's wedding",
+                            "predicate": "attended",
+                            "value": 1,
+                            "unit": "occurrence",
+                            "date": f"2025-0{call_count['facts']}-15",
+                            "confidence": 1.0,
+                            "is_user_action": True,
+                            "participants": [],
+                            "event_type": "wedding",
+                        }
+                    ]
+                )
+            elif "Extract atomic memories" in prompt:
+                call_count["extract"] += 1
+                if call_count["extract"] == 1:
+                    return json.dumps(
+                        [
+                            {
+                                "content": "Alice's friend had a lovely wedding ceremony",
+                                "category": "social",
+                                "event_date": "2025-01-15",
+                                "confidence": 1.0,
+                                "entities": [],
+                            }
+                        ]
+                    )
+                else:
+                    return json.dumps(
+                        [
+                            {
+                                "content": "Bob went to a beautiful outdoor wedding",
+                                "category": "social",
+                                "event_date": "2025-02-15",
+                                "confidence": 1.0,
+                                "entities": [],
+                            }
+                        ]
+                    )
+            elif "build a profile" in prompt:
+                return json.dumps({"static_profile": {}, "dynamic_profile": {}})
+            return "[]"
+
+        self.engine._llm_call = fact_llm
+
+        # Ingest for two different agents
+        self.engine.ingest(
+            "I attended my friend's wedding.",
+            session_key="s1",
+            agent_id="alice_agent_001",
+        )
+        self.engine.ingest(
+            "I went to a beautiful wedding.",
+            session_key="s2",
+            agent_id="bob_agent_002",
+        )
+
+        # Verify both agents' facts are in DB
+        conn = sqlite3.connect(self.db_path, timeout=10)
+        conn.row_factory = sqlite3.Row
+        all_facts = conn.execute(
+            "SELECT * FROM structured_facts WHERE is_user_action = 1"
+        ).fetchall()
+        conn.close()
+
+        self.assertGreaterEqual(len(all_facts), 2, "Should have facts from both agents")
+
+        # Now query via memories to check agent linkage
+        conn = sqlite3.connect(self.db_path, timeout=10)
+        conn.row_factory = sqlite3.Row
+        alice_facts = conn.execute(
+            """SELECT sf.* FROM structured_facts sf
+               JOIN memories m ON sf.memory_id = m.id
+               WHERE m.source_agent LIKE 'alice%' AND sf.is_user_action = 1""",
+        ).fetchall()
+        bob_facts = conn.execute(
+            """SELECT sf.* FROM structured_facts sf
+               JOIN memories m ON sf.memory_id = m.id
+               WHERE m.source_agent LIKE 'bob%' AND sf.is_user_action = 1""",
+        ).fetchall()
+        conn.close()
+
+        self.assertGreater(len(alice_facts), 0, "Alice should have facts")
+        self.assertGreater(len(bob_facts), 0, "Bob should have facts")
+        # They should be separate
+        alice_ids = {r["id"] for r in alice_facts}
+        bob_ids = {r["id"] for r in bob_facts}
+        self.assertEqual(len(alice_ids & bob_ids), 0, "Facts should not overlap between agents")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -970,6 +970,8 @@ Return ONLY a JSON object, no other text."""
 class AggregateRequest(BaseModel):
     question: str
     session_prefix: str | None = None  # Filter events to sessions matching this prefix
+    agent_id: str | None = None  # Filter results to a specific agent (exact match)
+    agent_id_prefix: str | None = None  # Filter results by agent_id prefix
 
 
 class SearchEventsRequest(BaseModel):
@@ -1020,48 +1022,86 @@ def _aggregate_sync(req: AggregateRequest):
     structured_answer = None
     structured_facts = []
 
-    fact_conditions = ["is_user_action = 1"]
+    # Determine if we need a JOIN to memories for agent_id filtering
+    agent_filter = req.agent_id or req.agent_id_prefix
+    use_agent_join = agent_filter is not None
+
+    if use_agent_join:
+        fact_conditions = ["sf.is_user_action = 1"]
+    else:
+        fact_conditions = ["is_user_action = 1"]
     fact_params = []
+
+    col_prefix = "sf." if use_agent_join else ""
 
     if fact_categories:
         cat_clauses = []
         for cat in fact_categories:
-            cat_clauses.append("category LIKE ?")
+            cat_clauses.append(f"{col_prefix}category LIKE ?")
             fact_params.append(f"%{cat.lower()}%")
         fact_conditions.append("(" + " OR ".join(cat_clauses) + ")")
 
     if fact_types:
         ft_clauses = []
         for ft in fact_types:
-            ft_clauses.append("fact_type LIKE ?")
+            ft_clauses.append(f"{col_prefix}fact_type LIKE ?")
             fact_params.append(f"%{ft.lower()}%")
         fact_conditions.append("(" + " OR ".join(ft_clauses) + ")")
 
     if req.session_prefix:
-        fact_conditions.append("session_key LIKE ?")
+        fact_conditions.append(f"{col_prefix}session_key LIKE ?")
         fact_params.append(f"bench_{req.session_prefix}%")
 
+    if agent_filter:
+        if req.agent_id:
+            fact_conditions.append("m.source_agent = ?")
+            fact_params.append(req.agent_id)
+        else:
+            fact_conditions.append("m.source_agent LIKE ?")
+            fact_params.append(f"{req.agent_id_prefix}%")
+
     fact_where = " AND ".join(fact_conditions)
-    fact_rows = conn.execute(
-        f"""SELECT id, fact_type, category, subject, predicate,
-                   value, unit, date, confidence, is_user_action, session_key
-            FROM structured_facts WHERE {fact_where}
-            ORDER BY date DESC""",
-        fact_params,
-    ).fetchall()
+
+    if use_agent_join:
+        fact_rows = conn.execute(
+            f"""SELECT sf.id, sf.fact_type, sf.category, sf.subject, sf.predicate,
+                       sf.value, sf.unit, sf.date, sf.confidence, sf.is_user_action,
+                       sf.session_key, sf.canonical_event_id
+                FROM structured_facts sf
+                JOIN memories m ON sf.memory_id = m.id
+                WHERE {fact_where}
+                ORDER BY sf.date DESC""",
+            fact_params,
+        ).fetchall()
+    else:
+        fact_rows = conn.execute(
+            f"""SELECT id, fact_type, category, subject, predicate,
+                       value, unit, date, confidence, is_user_action, session_key,
+                       canonical_event_id
+                FROM structured_facts WHERE {fact_where}
+                ORDER BY date DESC""",
+            fact_params,
+        ).fetchall()
 
     structured_facts = [dict(r) for r in fact_rows]
 
     if structured_facts:
-        # Deduplicate by subject (case-insensitive) for count_distinct
+        # Deduplicate by canonical_event_id (preferred) or subject (fallback)
         if operation == "count_distinct":
+            seen_canonical = set()
             seen_subjects = set()
             unique_facts = []
             for f in structured_facts:
-                subj_key = f["subject"].lower().strip()
-                if subj_key not in seen_subjects:
-                    seen_subjects.add(subj_key)
-                    unique_facts.append(f)
+                canonical_id = f.get("canonical_event_id")
+                if canonical_id:
+                    if canonical_id not in seen_canonical:
+                        seen_canonical.add(canonical_id)
+                        unique_facts.append(f)
+                else:
+                    subj_key = f["subject"].lower().strip()
+                    if subj_key not in seen_subjects:
+                        seen_subjects.add(subj_key)
+                        unique_facts.append(f)
             structured_answer = len(unique_facts)
             structured_facts = unique_facts
         elif operation in ("sum_duration", "sum_value"):
@@ -1118,6 +1158,26 @@ def _aggregate_sync(req: AggregateRequest):
             WHERE em.session_key LIKE ?
         )""")
         cluster_params.append(f"bench_{req.session_prefix}%")
+
+    if agent_filter:
+        if req.agent_id:
+            cluster_conditions.append("""id IN (
+                SELECT ecm.cluster_id FROM event_cluster_members ecm
+                JOIN event_mentions em ON em.id = ecm.event_id
+                JOIN event_mention_memories emm ON emm.event_id = em.id
+                JOIN memories m ON m.id = emm.memory_id
+                WHERE m.source_agent = ?
+            )""")
+            cluster_params.append(req.agent_id)
+        else:
+            cluster_conditions.append("""id IN (
+                SELECT ecm.cluster_id FROM event_cluster_members ecm
+                JOIN event_mentions em ON em.id = ecm.event_id
+                JOIN event_mention_memories emm ON emm.event_id = em.id
+                JOIN memories m ON m.id = emm.memory_id
+                WHERE m.source_agent LIKE ?
+            )""")
+            cluster_params.append(f"{req.agent_id_prefix}%")
 
     cluster_where = " AND ".join(cluster_conditions) if cluster_conditions else "1=1"
 
@@ -1244,6 +1304,8 @@ class AggregateSearchRequest(BaseModel):
     session_prefix: str | None = None
     top_k: int = 50
     include_source: bool = True
+    agent_id: str | None = None  # Filter results to a specific agent (exact match)
+    agent_id_prefix: str | None = None  # Filter results by agent_id prefix
 
 
 @app.post("/api/aggregate_search")
@@ -1539,14 +1601,17 @@ def _aggregate_search_sync(req: AggregateSearchRequest):
     conn.row_factory = _sqlite3.Row
 
     session_filter = f"bench_{req.session_prefix}%" if req.session_prefix else None
+    agent_filter = req.agent_id or req.agent_id_prefix
 
-    # Phase 1: Vector search with high top_k
+    # Phase 1: Vector search with high top_k (pass agent_id filter through)
     vector_results = _search_sync(
         SearchRequest(
             query=req.question,
             top_k=req.top_k,
             include_source=req.include_source,
             current_only=True,
+            agent_id=req.agent_id,
+            agent_id_prefix=req.agent_id_prefix,
         )
     )
     vector_memories = vector_results.get("results", [])
@@ -1569,6 +1634,26 @@ def _aggregate_search_sync(req: AggregateSearchRequest):
             WHERE em.session_key LIKE ?
         )""")
         cluster_params.append(session_filter)
+
+    if agent_filter:
+        if req.agent_id:
+            cluster_conditions.append("""ec.id IN (
+                SELECT ecm.cluster_id FROM event_cluster_members ecm
+                JOIN event_mentions em ON em.id = ecm.event_id
+                JOIN event_mention_memories emm ON emm.event_id = em.id
+                JOIN memories m ON m.id = emm.memory_id
+                WHERE m.source_agent = ?
+            )""")
+            cluster_params.append(req.agent_id)
+        else:
+            cluster_conditions.append("""ec.id IN (
+                SELECT ecm.cluster_id FROM event_cluster_members ecm
+                JOIN event_mentions em ON em.id = ecm.event_id
+                JOIN event_mention_memories emm ON emm.event_id = em.id
+                JOIN memories m ON m.id = emm.memory_id
+                WHERE m.source_agent LIKE ?
+            )""")
+            cluster_params.append(f"{req.agent_id_prefix}%")
 
     # Filter clusters by question keywords matching event_type, subtype, or canonical_label
     question_lower = req.question.lower()
@@ -1676,15 +1761,35 @@ def _aggregate_search_sync(req: AggregateSearchRequest):
     seen_ids = {m["id"] for m in vector_memories}
     keywords = topic_keywords  # reuse from Phase 2
 
-    if keywords and session_filter:
+    # Build keyword scan conditions (session_filter OR agent_filter required)
+    kw_scan_conditions = ["content LIKE ?", "is_current = 1"]
+    kw_scan_needs_run = False
+
+    if session_filter:
+        kw_scan_conditions.append("source_session LIKE ?")
+        kw_scan_needs_run = True
+    if agent_filter:
+        if req.agent_id:
+            kw_scan_conditions.append("source_agent = ?")
+        else:
+            kw_scan_conditions.append("source_agent LIKE ?")
+        kw_scan_needs_run = True
+
+    if keywords and kw_scan_needs_run:
         for kw in keywords[:5]:
+            kw_params: list = [f"%{kw}%"]
+            if session_filter:
+                kw_params.append(session_filter)
+            if agent_filter:
+                kw_params.append(req.agent_id if req.agent_id else f"{req.agent_id_prefix}%")
+            kw_where = " AND ".join(kw_scan_conditions)
             rows = conn.execute(
-                """SELECT id, content, category, confidence, document_date,
+                f"""SELECT id, content, category, confidence, document_date,
                           event_date, source_session, source_chunk_id, version
                    FROM memories
-                   WHERE content LIKE ? AND is_current = 1 AND source_session LIKE ?
+                   WHERE {kw_where}
                    LIMIT 30""",
-                (f"%{kw}%", session_filter),
+                kw_params,
             ).fetchall()
             for r in rows:
                 if r["id"] not in seen_ids:
