@@ -30,7 +30,7 @@ QUESTIONS_DIR = os.path.expanduser(
     "~/Projects/memorybench/data/benchmarks/longmemeval/datasets/questions"
 )
 WORKERS = 10  # concurrent sessions per question
-INGEST_TIMEOUT = 300  # seconds per session ingest
+INGEST_TIMEOUT = 600  # seconds per session ingest
 
 
 def log(msg):
@@ -65,7 +65,7 @@ def get_ingested_qids(db_path):
     qids = set()
     for src in sessions:
         # Extract qid from bench_<qid>-<rest>
-        after_bench = src[len("bench_"):]
+        after_bench = src[len("bench_") :]
         # qid is the first part before the first "-" unless it starts with "gpt4_"
         if after_bench.startswith("gpt4_"):
             parts = after_bench.split("-", 1)
@@ -113,9 +113,7 @@ def ingest_session(api_url, messages, container_tag, session_id, date=None):
         payload["metadata"] = {"date": date}
 
     try:
-        r = requests.post(
-            f"{api_url}/api/ingest", json=payload, timeout=INGEST_TIMEOUT
-        )
+        r = requests.post(f"{api_url}/api/ingest", json=payload, timeout=INGEST_TIMEOUT)
         r.raise_for_status()
         data = r.json()
         return data.get("count", data.get("memories_created", 0))
@@ -363,14 +361,16 @@ def step5_full_eval():
 
     google_key = os.environ.get("GOOGLE_API_KEY", "")
     server_env = os.environ.copy()
-    server_env.update({
-        "ULTRAMEMORY_DB_PATH": eval_db_fresh,
-        "ULTRAMEMORY_EMBEDDING_PROVIDER": "litellm",
-        "ULTRAMEMORY_EMBEDDING_MODEL": "gemini/gemini-embedding-2-preview",
-        "ULTRAMEMORY_MODEL": "gemini/gemini-2.5-flash",
-        "GOOGLE_API_KEY": google_key,
-        "GEMINI_API_KEY": google_key,
-    })
+    server_env.update(
+        {
+            "ULTRAMEMORY_DB_PATH": eval_db_fresh,
+            "ULTRAMEMORY_EMBEDDING_PROVIDER": "litellm",
+            "ULTRAMEMORY_EMBEDDING_MODEL": "gemini/gemini-embedding-2-preview",
+            "ULTRAMEMORY_MODEL": "gemini/gemini-2.5-flash",
+            "GOOGLE_API_KEY": google_key,
+            "GEMINI_API_KEY": google_key,
+        }
+    )
     # Remove fast ingest flag — we want full pipeline for eval
     server_env.pop("ULTRAMEMORY_FAST_INGEST", None)
     server_env.pop("ULTRAMEMORY_SKIP_FACTS", None)
@@ -398,23 +398,33 @@ def step5_full_eval():
     answering_model = "gemini-2.5-flash"
 
     bench_env = os.environ.copy()
-    bench_env.update({
-        "OPENCLAW_SUPERMEMORY_URL": "http://127.0.0.1:8643",
-        "GOOGLE_API_KEY": google_key,
-        "GEMINI_API_KEY": google_key,
-    })
+    bench_env.update(
+        {
+            "OPENCLAW_SUPERMEMORY_URL": "http://127.0.0.1:8643",
+            "GOOGLE_API_KEY": google_key,
+            "GEMINI_API_KEY": google_key,
+        }
+    )
 
     all_ok = True
     for bench in benchmarks:
         log(f"Running {bench} benchmark (run: {run_id})...")
         result = subprocess.run(
             [
-                "bun", "run", "src/index.ts", "run",
-                "-p", "openclaw-supermemory",
-                "-b", bench,
-                "-j", judge,
-                "-m", answering_model,
-                "-r", run_id,
+                "bun",
+                "run",
+                "src/index.ts",
+                "run",
+                "-p",
+                "openclaw-supermemory",
+                "-b",
+                bench,
+                "-j",
+                judge,
+                "-m",
+                answering_model,
+                "-r",
+                run_id,
             ],
             cwd=memorybench_dir,
             env=bench_env,

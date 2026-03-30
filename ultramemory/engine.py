@@ -35,7 +35,7 @@ from ultramemory.config import get_config
 
 # ── Schema ───────────────────────────────────────────────────────────────────
 
-SCHEMA_SQL = """
+SCHEMA_TABLES_SQL = """
 CREATE TABLE IF NOT EXISTS source_chunks (
     id TEXT PRIMARY KEY,
     content TEXT NOT NULL,
@@ -96,19 +96,6 @@ CREATE TABLE IF NOT EXISTS entity_aliases (
     canonical TEXT NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_memories_current ON memories(is_current);
-CREATE INDEX IF NOT EXISTS idx_memories_category ON memories(category);
-CREATE INDEX IF NOT EXISTS idx_memories_session ON memories(source_session);
-CREATE INDEX IF NOT EXISTS idx_memories_agent ON memories(source_agent);
-CREATE INDEX IF NOT EXISTS idx_memories_chunk ON memories(source_chunk_id);
-CREATE INDEX IF NOT EXISTS idx_relations_from ON memory_relations(from_memory);
-CREATE INDEX IF NOT EXISTS idx_relations_to ON memory_relations(to_memory);
-CREATE INDEX IF NOT EXISTS idx_profiles_entity ON profiles(entity_name);
-CREATE INDEX IF NOT EXISTS idx_memory_entities_entity ON memory_entities(entity_name);
-CREATE INDEX IF NOT EXISTS idx_memory_entities_memory ON memory_entities(memory_id);
-CREATE INDEX IF NOT EXISTS idx_entity_aliases_canonical ON entity_aliases(canonical);
-CREATE INDEX IF NOT EXISTS idx_source_chunks_session ON source_chunks(session_key);
-
 -- Event extraction + clustering layer
 CREATE TABLE IF NOT EXISTS event_mentions (
     id TEXT PRIMARY KEY,
@@ -157,12 +144,6 @@ CREATE TABLE IF NOT EXISTS event_mention_memories (
     FOREIGN KEY (memory_id) REFERENCES memories(id)
 );
 
-CREATE INDEX IF NOT EXISTS idx_event_mentions_type ON event_mentions(event_type, subtype);
-CREATE INDEX IF NOT EXISTS idx_event_mentions_session ON event_mentions(session_key);
-CREATE INDEX IF NOT EXISTS idx_event_mentions_chunk ON event_mentions(source_chunk_id);
-CREATE INDEX IF NOT EXISTS idx_event_clusters_type ON event_clusters(event_type, subtype);
-CREATE INDEX IF NOT EXISTS idx_event_clusters_distinct ON event_clusters(distinct_key);
-
 -- Structured facts layer for aggregate queries
 CREATE TABLE IF NOT EXISTS structured_facts (
     id TEXT PRIMARY KEY,
@@ -185,7 +166,27 @@ CREATE TABLE IF NOT EXISTS structured_facts (
     FOREIGN KEY (memory_id) REFERENCES memories(id),
     FOREIGN KEY (source_chunk_id) REFERENCES source_chunks(id)
 );
+"""
 
+# Indexes are created AFTER migrations so new columns exist before indexing
+SCHEMA_INDEXES_SQL = """
+CREATE INDEX IF NOT EXISTS idx_memories_current ON memories(is_current);
+CREATE INDEX IF NOT EXISTS idx_memories_category ON memories(category);
+CREATE INDEX IF NOT EXISTS idx_memories_session ON memories(source_session);
+CREATE INDEX IF NOT EXISTS idx_memories_agent ON memories(source_agent);
+CREATE INDEX IF NOT EXISTS idx_memories_chunk ON memories(source_chunk_id);
+CREATE INDEX IF NOT EXISTS idx_relations_from ON memory_relations(from_memory);
+CREATE INDEX IF NOT EXISTS idx_relations_to ON memory_relations(to_memory);
+CREATE INDEX IF NOT EXISTS idx_profiles_entity ON profiles(entity_name);
+CREATE INDEX IF NOT EXISTS idx_memory_entities_entity ON memory_entities(entity_name);
+CREATE INDEX IF NOT EXISTS idx_memory_entities_memory ON memory_entities(memory_id);
+CREATE INDEX IF NOT EXISTS idx_entity_aliases_canonical ON entity_aliases(canonical);
+CREATE INDEX IF NOT EXISTS idx_source_chunks_session ON source_chunks(session_key);
+CREATE INDEX IF NOT EXISTS idx_event_mentions_type ON event_mentions(event_type, subtype);
+CREATE INDEX IF NOT EXISTS idx_event_mentions_session ON event_mentions(session_key);
+CREATE INDEX IF NOT EXISTS idx_event_mentions_chunk ON event_mentions(source_chunk_id);
+CREATE INDEX IF NOT EXISTS idx_event_clusters_type ON event_clusters(event_type, subtype);
+CREATE INDEX IF NOT EXISTS idx_event_clusters_distinct ON event_clusters(distinct_key);
 CREATE INDEX IF NOT EXISTS idx_structured_facts_memory ON structured_facts(memory_id);
 CREATE INDEX IF NOT EXISTS idx_structured_facts_type ON structured_facts(fact_type, category);
 CREATE INDEX IF NOT EXISTS idx_structured_facts_category ON structured_facts(category);
@@ -345,15 +346,12 @@ class MemoryEngine:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA busy_timeout=30000")
             conn.execute("PRAGMA foreign_keys=ON")
-            conn.executescript(SCHEMA_SQL)
-            # Migration: add source_chunk_id column if only old source_chunk exists
+            # Step 1: Create tables (IF NOT EXISTS = no-op for existing tables)
+            conn.executescript(SCHEMA_TABLES_SQL)
+            # Step 2: Migrations (add columns to existing tables)
             cols = {r[1] for r in conn.execute("PRAGMA table_info(memories)").fetchall()}
             if "source_chunk_id" not in cols:
                 conn.execute("ALTER TABLE memories ADD COLUMN source_chunk_id TEXT")
-                conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_memories_chunk ON memories(source_chunk_id)"
-                )
-            # Migration: add new columns to structured_facts for canonical dedup
             sf_cols = {r[1] for r in conn.execute("PRAGMA table_info(structured_facts)").fetchall()}
             if "participants" not in sf_cols:
                 conn.execute("ALTER TABLE structured_facts ADD COLUMN participants TEXT")
@@ -361,9 +359,8 @@ class MemoryEngine:
                 conn.execute("ALTER TABLE structured_facts ADD COLUMN event_type TEXT")
             if "canonical_event_id" not in sf_cols:
                 conn.execute("ALTER TABLE structured_facts ADD COLUMN canonical_event_id TEXT")
-                conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_structured_facts_canonical ON structured_facts(canonical_event_id)"
-                )
+            # Step 3: Create indexes (after migrations so all columns exist)
+            conn.executescript(SCHEMA_INDEXES_SQL)
 
     def _conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=30)

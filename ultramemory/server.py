@@ -130,6 +130,17 @@ class IngestRequest(BaseModel):
 
 # ── Query Classification ───────────────────────────────────────────────────
 
+# Temporal duration patterns — checked BEFORE counting so
+# "how many days between X and Y" routes to temporal, not counting.
+_TEMPORAL_DURATION_PATTERNS = re.compile(
+    r"\b(?:"
+    r"how many (?:days?|weeks?|months?|years?|hours?) (?:between|since|before|after|ago|until|from|passed|elapsed|did it take|have passed|had passed)"
+    r"|(?:total|combined|number of) (?:number of )?(?:days?|weeks?|months?|years?|hours?) (?:spent|in|at|between|since|I spent)"
+    r"|how long (?:did|was|were|has|have|had|ago|before|after|between|since|until)"
+    r")\b",
+    re.IGNORECASE,
+)
+
 _COUNTING_PATTERNS = re.compile(
     r"\b(?:how many|how often|count of|total number of|how much(?!\s+(?:does|do|is|was|did)\b))\b",
     re.IGNORECASE,
@@ -158,7 +169,11 @@ def classify_query(query: str) -> str:
     """Classify a search query into 'counting', 'temporal', or 'lookup'.
 
     Uses compiled regex patterns for speed (<1ms). No LLM calls.
+    Temporal duration queries (e.g. "how many days between X and Y")
+    are checked first to avoid misclassification as counting.
     """
+    if _TEMPORAL_DURATION_PATTERNS.search(query):
+        return "temporal"
     if _COUNTING_PATTERNS.search(query):
         return "counting"
     if _TEMPORAL_PATTERNS.search(query):
